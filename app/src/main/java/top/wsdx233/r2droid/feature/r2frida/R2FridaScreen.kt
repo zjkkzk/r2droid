@@ -892,7 +892,7 @@ private fun FridaHelpSheetContent(context: android.content.Context, onDismiss: (
         FridaLinkCard(
             title = stringResource(R.string.frida_help_gadgeter),
             description = stringResource(R.string.frida_help_gadgeter_desc),
-            url = "https://github.com/wsdx233/Gadgeter",
+            url = "https://github.com/wsdx233/Gadgater",
             icon = Icons.Default.PhoneAndroid,
             context = context
         )

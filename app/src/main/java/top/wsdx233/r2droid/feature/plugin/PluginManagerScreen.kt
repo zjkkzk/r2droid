@@ -3,6 +3,7 @@ package top.wsdx233.r2droid.feature.plugin
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,12 +19,46 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Pending
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -223,7 +258,6 @@ fun PluginManagerScreen(
                 else -> LogsTab(
                     status = status,
                     logs = logs,
-                    onClear = { PluginManager.clearLogs() }
                 )
             }
         }
@@ -495,6 +529,7 @@ private fun SourceManageTab(
     var showCreateDialog by remember { mutableStateOf(false) }
     var editingRepo by remember { mutableStateOf<String?>(null) }
     var editingSourceInput by remember { mutableStateOf("") }
+    var pendingRemoveRepo by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -531,6 +566,19 @@ private fun SourceManageTab(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
+                TextButton(
+                    onClick = onInstallZip,
+                    enabled = !isWorking
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Archive,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(stringResource(R.string.plugin_install_zip))
+                }
+                Spacer(modifier = Modifier.width(8.dp))
                 TextButton(
                     onClick = onResetDefault,
                     enabled = !isWorking
@@ -594,12 +642,6 @@ private fun SourceManageTab(
                             ) {
                                 Text(stringResource(R.string.plugin_developer_create_plugin))
                             }
-                            Button(
-                                onClick = onInstallZip,
-                                enabled = !isWorking
-                            ) {
-                                Text(stringResource(R.string.plugin_install_zip))
-                            }
                         }
                     }
                 }
@@ -621,17 +663,19 @@ private fun SourceManageTab(
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    IconButton(
-                        onClick = {
-                            editingRepo = repo
-                            editingSourceInput = repo
-                        },
-                        enabled = !isWorking
-                    ) {
-                        Icon(Icons.Default.Edit, contentDescription = stringResource(R.string.plugin_edit_source))
-                    }
-                    TextButton(onClick = { onRemove(repo) }, enabled = !isWorking) {
-                        Text(stringResource(R.string.plugin_remove_source))
+                    Row {
+                        IconButton(
+                            onClick = {
+                                editingRepo = repo
+                                editingSourceInput = repo
+                            },
+                            enabled = !isWorking
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = stringResource(R.string.plugin_edit_source))
+                        }
+                        IconButton(onClick = { pendingRemoveRepo = repo }, enabled = !isWorking) {
+                            Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.plugin_remove_source))
+                        }
                     }
                 }
             }
@@ -682,6 +726,31 @@ private fun SourceManageTab(
                     editingSourceInput = ""
                 }) {
                     Text(stringResource(R.string.plugin_developer_create_cancel))
+                }
+            }
+        )
+    }
+
+    val currentRemoveRepo = pendingRemoveRepo
+    if (currentRemoveRepo != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRemoveRepo = null },
+            title = { Text(stringResource(R.string.plugin_remove_source)) },
+            text = { Text(currentRemoveRepo) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemove(currentRemoveRepo)
+                        pendingRemoveRepo = null
+                    },
+                    enabled = !isWorking
+                ) {
+                    Text(stringResource(R.string.plugin_remove_source))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemoveRepo = null }) {
+                    Text(stringResource(R.string.dialog_cancel))
                 }
             }
         )
@@ -791,19 +860,50 @@ private fun CreateDeveloperPluginDialog(
 private fun LogsTab(
     status: String?,
     logs: List<String>,
-    onClear: () -> Unit
 ) {
+    val (titleStr, icon, color) = when {
+        status == null -> Triple(stringResource(R.string.plugin_status_title_idle), Icons.Default.Info, MaterialTheme.colorScheme.onSurface)
+        status.contains("fail", ignoreCase = true) || status.contains("error", ignoreCase = true) || status.contains("错误") -> 
+            Triple(stringResource(R.string.plugin_status_title_error), Icons.Default.Error, MaterialTheme.colorScheme.error)
+        status.endsWith("...") || status.endsWith("…") || status.contains("ing") || status.contains("中") -> 
+            Triple(stringResource(R.string.plugin_status_title_processing), Icons.Default.Pending, MaterialTheme.colorScheme.primary)
+        else -> 
+            Triple(stringResource(R.string.plugin_status_title_success), Icons.Default.CheckCircle, MaterialTheme.colorScheme.primary)
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = stringResource(R.string.plugin_status_prefix, status ?: "-"),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
-                )
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth(),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = color,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Column {
+                        Text(
+                            text = titleStr,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = color
+                        )
+                        Text(
+                            text = status ?: stringResource(R.string.common_idle),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
             }
         }
 
@@ -816,9 +916,9 @@ private fun LogsTab(
                     text = stringResource(R.string.plugin_logs_title),
                     style = MaterialTheme.typography.titleMedium
                 )
-                TextButton(onClick = onClear) {
-                    Text(stringResource(R.string.common_clear))
-                }
+//                TextButton(onClick = onClear) {
+//                    Text(stringResource(R.string.common_clear))
+//                }
             }
         }
 

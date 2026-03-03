@@ -607,6 +607,10 @@
     <string name="feature_plugins_title">插件管理</string>
     <string name="feature_plugins_desc">安装和管理扩展功能</string>
     <string name="plugin_status_prefix">状态：%1$s</string>
+    <string name="plugin_status_title_idle">空闲</string>
+    <string name="plugin_status_title_processing">处理中</string>
+    <string name="plugin_status_title_success">完成</string>
+    <string name="plugin_status_title_error">错误</string>
     <string name="plugin_repositories_title">仓库源</string>
     <string name="plugin_add_source_hint">索引地址</string>
     <string name="plugin_add_source">添加</string>

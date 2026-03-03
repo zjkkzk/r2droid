@@ -607,6 +607,11 @@
     <string name="feature_manual_desc">Офлайн справка по командам Radare2</string>
     <string name="feature_plugins_title">Управление плагинами</string>
     <string name="feature_plugins_desc">Установка и управление расширениями</string>
+    <string name="plugin_status_prefix">Статус: %1$s</string>
+    <string name="plugin_status_title_idle">Ожидание</string>
+    <string name="plugin_status_title_processing">В процессе</string>
+    <string name="plugin_status_title_success">Готово</string>
+    <string name="plugin_status_title_error">Ошибка</string>
     <string name="features_custom_start_dialog_title">Своя команда R2</string>
     <string name="features_custom_start_hint">Полная команда</string>
     <string name="features_custom_start_examples">напр. r2 -  или  r2 \"frida://attach/pid\"</string>

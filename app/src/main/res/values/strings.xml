@@ -605,6 +605,10 @@
     <string name="feature_plugins_title">Plugin Management</string>
     <string name="feature_plugins_desc">Install and manage extended features</string>
     <string name="plugin_status_prefix">Status: %1$s</string>
+    <string name="plugin_status_title_idle">Idle</string>
+    <string name="plugin_status_title_processing">Processing</string>
+    <string name="plugin_status_title_success">Done</string>
+    <string name="plugin_status_title_error">Error</string>
     <string name="plugin_repositories_title">Repositories</string>
     <string name="plugin_add_source_hint">Index URL </string>
     <string name="plugin_add_source">Add</string>

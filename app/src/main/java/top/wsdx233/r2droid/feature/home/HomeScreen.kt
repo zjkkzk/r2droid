@@ -147,7 +147,7 @@ fun HomeScreen(
     val isWide = widthClass != WindowWidthClass.Compact
 
     Surface(
-        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars),
+        modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
         if (isWide) {
@@ -155,6 +155,7 @@ fun HomeScreen(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
                     .padding(24.dp),
                 horizontalArrangement = Arrangement.spacedBy(24.dp)
             ) {
@@ -295,6 +296,7 @@ private fun HomeCompactLayout(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(24.dp)
     ) {
         Spacer(modifier = Modifier.height(32.dp))
