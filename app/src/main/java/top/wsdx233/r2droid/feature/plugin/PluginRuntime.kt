@@ -1,13 +1,18 @@
 package top.wsdx233.r2droid.feature.plugin
 
+import android.content.Context
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.define
 import com.dokar.quickjs.binding.function
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import top.wsdx233.r2droid.core.data.model.SavedProject
+import top.wsdx233.r2droid.core.data.prefs.SettingsManager
+import top.wsdx233.r2droid.feature.project.data.SavedProjectRepository
 import top.wsdx233.r2droid.util.R2PipeManager
 import java.io.File
 import java.net.HttpURLConnection
@@ -28,7 +33,9 @@ object PluginRuntime {
         TERMINAL("terminal"),
         FRIDA("frida"),
         SETTINGS_READ("settings.read"),
-        SETTINGS_WRITE("settings.write")
+        SETTINGS_WRITE("settings.write"),
+        SAF_PICKER("saf.picker"),
+        PROJECT_READ("project.read")
     }
 
     private data class RunContext(
@@ -44,6 +51,13 @@ object PluginRuntime {
     )
 
     private val processSessions = ConcurrentHashMap<String, ProcessSession>()
+    private val appContextRef = java.util.concurrent.atomic.AtomicReference<Context?>(null)
+    private val pendingFilePickers = ConcurrentHashMap<String, CompletableDeferred<String>>()
+    private val pendingDirPickers = ConcurrentHashMap<String, CompletableDeferred<String>>()
+
+    fun initialize(context: Context) {
+        appContextRef.set(context.applicationContext)
+    }
 
     suspend fun runPluginScript(pluginId: String, code: String): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
@@ -153,6 +167,77 @@ object PluginRuntime {
     fun resolveTerminalStartupCommand(pluginId: String, rawCommand: String): Result<String> = runCatching {
         val context = createContext(pluginId)
         applyTerminalCommandPlaceholders(rawCommand, context.installDir)
+    }
+
+    suspend fun pickFile(pluginId: String, requestId: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val context = createContext(pluginId)
+            requirePermission(context, Permission.SAF_PICKER)
+            val key = pickerKey(pluginId, requestId)
+            check(!pendingFilePickers.containsKey(key)) { "picker request already pending" }
+            val deferred = CompletableDeferred<String>()
+            pendingFilePickers[key] = deferred
+            val result = deferred.await()
+            pendingFilePickers.remove(key)
+            result
+        }.onFailure {
+            pendingFilePickers.remove(pickerKey(pluginId, requestId))
+        }
+    }
+
+    suspend fun pickDirectory(pluginId: String, requestId: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val context = createContext(pluginId)
+            requirePermission(context, Permission.SAF_PICKER)
+            val key = pickerKey(pluginId, requestId)
+            check(!pendingDirPickers.containsKey(key)) { "picker request already pending" }
+            val deferred = CompletableDeferred<String>()
+            pendingDirPickers[key] = deferred
+            val result = deferred.await()
+            pendingDirPickers.remove(key)
+            result
+        }.onFailure {
+            pendingDirPickers.remove(pickerKey(pluginId, requestId))
+        }
+    }
+
+    fun completeFilePicker(pluginId: String, requestId: String, absolutePath: String?): Boolean {
+        val key = pickerKey(pluginId, requestId)
+        val deferred = pendingFilePickers.remove(key) ?: return false
+        if (absolutePath.isNullOrBlank()) {
+            deferred.completeExceptionally(IllegalStateException("file pick cancelled"))
+        } else {
+            deferred.complete(absolutePath)
+        }
+        return true
+    }
+
+    fun completeDirPicker(pluginId: String, requestId: String, absolutePath: String?): Boolean {
+        val key = pickerKey(pluginId, requestId)
+        val deferred = pendingDirPickers.remove(key) ?: return false
+        if (absolutePath.isNullOrBlank()) {
+            deferred.completeExceptionally(IllegalStateException("directory pick cancelled"))
+        } else {
+            deferred.complete(absolutePath)
+        }
+        return true
+    }
+
+    fun getProjectsRootDir(pluginId: String): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROJECT_READ)
+        val root = resolveProjectsRootDir(getAppContext())
+        root.mkdirs()
+        root.absolutePath
+    }
+
+    fun listProjectsInfo(pluginId: String): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROJECT_READ)
+        val appCtx = getAppContext()
+        val repo = SavedProjectRepository(appCtx)
+        val projects = runBlocking { repo.getAllProjects() }
+        projectsToJson(projects)
     }
 
     private fun createContext(pluginId: String): RunContext {
@@ -305,6 +390,14 @@ object PluginRuntime {
                 function<String, String>("procAlive") { sessionId ->
                     requirePermission(context, Permission.PROCESS)
                     if (isProcessAlive(context, sessionId)) "true" else "false"
+                }
+
+                function<String>("projectsRootDir") { _ ->
+                    getProjectsRootDir(context.pluginId).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("projectsInfo") { _ ->
+                    listProjectsInfo(context.pluginId).getOrElse { "Error: ${it.message}" }
                 }
 
                 function("emit") { args ->
@@ -462,6 +555,11 @@ object PluginRuntime {
 
     private fun processKey(pluginId: String, sessionId: String): String = "$pluginId#$sessionId"
 
+    private fun pickerKey(pluginId: String, requestId: String): String {
+        val normalized = requestId.trim().ifBlank { "default" }
+        return "$pluginId#$normalized"
+    }
+
     private fun applyTerminalCommandPlaceholders(commandLine: String, installDir: File): String {
         val pluginDir = installDir.absolutePath
         return commandLine
@@ -522,6 +620,55 @@ object PluginRuntime {
             }
         } finally {
             conn.disconnect()
+        }
+    }
+
+    private fun getAppContext(): Context {
+        return appContextRef.get() ?: error("PluginRuntime not initialized")
+    }
+
+    private fun resolveProjectsRootDir(context: Context): File {
+        val customHome = SettingsManager.projectHome
+        val base = if (!customHome.isNullOrBlank()) {
+            val dir = File(customHome, "projects")
+            if (dir.exists() || dir.mkdirs()) dir else File(context.filesDir, "projects")
+        } else {
+            File(context.filesDir, "projects")
+        }
+        if (!base.exists()) base.mkdirs()
+        return base
+    }
+
+    private fun projectsToJson(projects: List<SavedProject>): String {
+        val escaped = projects.joinToString(separator = ",", prefix = "[", postfix = "]") { p ->
+            "{" +
+                "\"id\":\"${escapeJson(p.id)}\"," +
+                "\"name\":\"${escapeJson(p.name)}\"," +
+                "\"binaryPath\":\"${escapeJson(p.binaryPath)}\"," +
+                "\"scriptPath\":\"${escapeJson(p.scriptPath)}\"," +
+                "\"createdAt\":${p.createdAt}," +
+                "\"lastModified\":${p.lastModified}," +
+                "\"fileSize\":${p.fileSize}," +
+                "\"archType\":\"${escapeJson(p.archType)}\"," +
+                "\"binType\":\"${escapeJson(p.binType)}\"," +
+                "\"analysisLevel\":\"${escapeJson(p.analysisLevel)}\"" +
+            "}"
+        }
+        return escaped
+    }
+
+    private fun escapeJson(value: String): String {
+        return buildString(value.length + 8) {
+            value.forEach { ch ->
+                when (ch) {
+                    '"' -> append("\\\"")
+                    '\\' -> append("\\\\")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else -> append(ch)
+                }
+            }
         }
     }
 

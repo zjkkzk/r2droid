@@ -5,6 +5,7 @@ import dagger.hilt.android.HiltAndroidApp
 import cat.ereza.customactivityoncrash.config.CaocConfig
 import top.wsdx233.r2droid.activity.CrashActivity
 import top.wsdx233.r2droid.feature.plugin.PluginManager
+import top.wsdx233.r2droid.feature.plugin.PluginRuntime
 
 @HiltAndroidApp
 class R2DroidApplication : Application() {
@@ -15,5 +16,6 @@ class R2DroidApplication : Application() {
             .apply()
 
         PluginManager.initialize(this)
+        PluginRuntime.initialize(this)
     }
 }

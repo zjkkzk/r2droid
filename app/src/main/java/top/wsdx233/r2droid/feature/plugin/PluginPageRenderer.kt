@@ -1,11 +1,15 @@
 package top.wsdx233.r2droid.feature.plugin
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,13 +38,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import top.wsdx233.r2droid.activity.TerminalActivity
 import top.wsdx233.r2droid.util.R2PipeManager
+import top.wsdx233.r2droid.util.UriUtils
 import java.io.File
+import java.io.FileOutputStream
 
 @Composable
 fun PluginPageRenderer(
@@ -112,6 +120,7 @@ private fun WebViewPluginPage(
     path: String,
     modifier: Modifier = Modifier
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val pageFile = PluginManager.resolvePluginFile(pluginId, path)
 
     if (pageFile == null) {
@@ -126,7 +135,40 @@ private fun WebViewPluginPage(
         return
     }
 
-    val bridge = remember(pluginId) { PluginWebBridge(pluginId) }
+    var pendingFileRequestId by remember(pluginId) { mutableStateOf<String?>(null) }
+    var pendingDirRequestId by remember(pluginId) { mutableStateOf<String?>(null) }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val requestId = pendingFileRequestId
+        if (requestId != null) {
+            val pathResult = uri?.let { resolveUriToAbsolutePath(context, it) }
+            PluginRuntime.completeFilePicker(pluginId, requestId, pathResult)
+            pendingFileRequestId = null
+        }
+    }
+
+    val dirPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val requestId = pendingDirRequestId
+        if (requestId != null) {
+            val pathResult = uri?.let { UriUtils.getTreePath(context, it) }
+            PluginRuntime.completeDirPicker(pluginId, requestId, pathResult)
+            pendingDirRequestId = null
+        }
+    }
+
+    val bridge = remember(pluginId) {
+        PluginWebBridge(
+            pluginId = pluginId,
+            onPickFileRequest = { requestId ->
+                pendingFileRequestId = requestId
+                filePickerLauncher.launch(arrayOf("*/*"))
+            },
+            onPickDirectoryRequest = { requestId ->
+                pendingDirRequestId = requestId
+                dirPickerLauncher.launch(null)
+            }
+        )
+    }
 
     AndroidView(
         modifier = modifier.fillMaxSize(),
@@ -147,6 +189,27 @@ private fun WebViewPluginPage(
             }
         }
     )
+}
+
+private fun resolveUriToAbsolutePath(context: Context, uri: Uri): String? {
+    return try {
+        val direct = UriUtils.getPath(context, uri)
+        if (!direct.isNullOrBlank()) {
+            val file = File(direct)
+            if (file.exists() && file.canRead()) {
+                return direct
+            }
+        }
+
+        val input = context.contentResolver.openInputStream(uri) ?: return null
+        val target = File(context.cacheDir, "plugin_pick_${System.currentTimeMillis()}")
+        FileOutputStream(target).use { output ->
+            input.use { it.copyTo(output) }
+        }
+        target.absolutePath
+    } catch (_: Exception) {
+        null
+    }
 }
 
 @Composable
@@ -475,7 +538,9 @@ private fun parseContentAlignment(value: String?): Alignment {
 }
 
 private class PluginWebBridge(
-    private val pluginId: String
+    private val pluginId: String,
+    private val onPickFileRequest: (String) -> Unit,
+    private val onPickDirectoryRequest: (String) -> Unit
 ) {
     @JavascriptInterface
     fun r2(command: String): String {
@@ -578,6 +643,48 @@ private class PluginWebBridge(
     fun systemLanguage(): String {
         return PluginRuntime.getSystemLanguageTag()
     }
+
+    @JavascriptInterface
+    fun pickFile(requestId: String): String {
+        val normalized = requestId.trim().ifBlank { "default" }
+        return runBlocking {
+            withContext(Dispatchers.Main) {
+                onPickFileRequest(normalized)
+            }
+            PluginRuntime.pickFile(pluginId, normalized)
+                .getOrElse { "Error: ${it.message}" }
+        }
+    }
+
+    @JavascriptInterface
+    fun pickDirectory(requestId: String): String {
+        val normalized = requestId.trim().ifBlank { "default" }
+        return runBlocking {
+            withContext(Dispatchers.Main) {
+                onPickDirectoryRequest(normalized)
+            }
+            PluginRuntime.pickDirectory(pluginId, normalized)
+                .getOrElse { "Error: ${it.message}" }
+        }
+    }
+
+    @JavascriptInterface
+    fun projectsRootDir(): String {
+        return PluginRuntime.getProjectsRootDir(pluginId)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun projectsInfo(): String {
+        return PluginRuntime.listProjectsInfo(pluginId)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun projectDir(): String = projectsRootDir()
+
+    @JavascriptInterface
+    fun projectInfo(): String = projectsInfo()
 }
 
 @Serializable
