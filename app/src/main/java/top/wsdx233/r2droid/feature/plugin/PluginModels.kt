@@ -19,7 +19,8 @@ data class PluginIndexEntry(
     @SerialName("author") val author: String = "",
     @SerialName("downloadUrl") val downloadUrl: String,
     @SerialName("sha256") val sha256: String,
-    @SerialName("manifestPath") val manifestPath: String = "manifest.json"
+    @SerialName("manifestPath") val manifestPath: String = "manifest.json",
+    @SerialName("min_version") val minVersion: String? = null
 )
 
 @Serializable
@@ -94,12 +95,18 @@ data class InstalledPlugin(
     val state: InstalledPluginState,
     val manifest: PluginManifest?
 )
-
 data class PluginCatalogItem(
     val indexEntry: PluginIndexEntry,
     val installed: InstalledPlugin?,
     val hasUpgrade: Boolean
 )
+
+data class PluginVersionCompatibility(
+    val minVersion: String?,
+    val currentVersion: String,
+    val compatible: Boolean
+)
+
 
 data class PluginProjectTabDescriptor(
     val pluginId: String,

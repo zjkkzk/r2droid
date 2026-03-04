@@ -652,6 +652,9 @@
     <string name="plugin_developer_plugin_description">描述</string>
     <string name="plugin_developer_create_confirm">创建</string>
     <string name="plugin_developer_create_cancel">取消</string>
+    <string name="plugin_incompatible_version_title">插件版本不兼容</string>
+    <string name="plugin_incompatible_version_message">插件“%1$s”要求 r2droid 版本不低于 %2$s，当前版本为 %3$s。</string>
+    <string name="plugin_incompatible_version_confirm">知道了</string>
     <string name="features_custom_start_dialog_title">自定义 R2 指令</string>
     <string name="features_custom_start_hint">完整指令</string>
     <string name="features_custom_start_examples">例如 r2 -  或  r2 \"frida://attach/pid\"</string>

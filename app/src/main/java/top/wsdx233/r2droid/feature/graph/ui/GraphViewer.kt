@@ -9,15 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -44,46 +36,41 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-// Layout constants — sized for mobile readability
-private const val NODE_PADDING = 20f
-private const val NODE_TITLE_HEIGHT = 44f
-private const val INSTR_LINE_HEIGHT = 28f
-private const val NODE_MIN_WIDTH = 280f
-private const val NODE_CORNER_RADIUS = 12f
-private const val LAYER_GAP_Y = 80f
-private const val NODE_GAP_X = 60f
-private const val CHAR_WIDTH_APPROX = 9f
-private const val ARROW_SIZE = 12f
-private const val MAX_INSTRUCTIONS_PER_NODE = 30
+// 1. 布局常量 - 调整了层间距，给走线留出充裕空间
+private const val NODE_PADDING = 12f
+private const val NODE_TITLE_HEIGHT = 32f
+private const val INSTR_LINE_HEIGHT = 22f
+private const val NODE_MIN_WIDTH = 200f
+private const val NODE_CORNER_RADIUS = 6f
+private const val LAYER_GAP_Y = 72f  // 增加层间距，防止水平线拥挤重叠
+private const val NODE_GAP_X = 24f
+private const val CHAR_WIDTH_APPROX = 8f
+private const val ARROW_SIZE = 10f
+private const val MAX_INSTRUCTIONS_PER_NODE = 40
 private const val ADDR_DISASM_GAP = 12f
+private const val TRACK_SPACING = 12f // 轨道间距
 
-// Colors
-private val nodeBgColor = Color(0xFF2D2D2D)
-private val nodeTitleBgColor = Color(0xFF3C3C3C)
+// 颜色定义
+private val nodeBgColor = Color(0xFF1E1E1E)
+private val nodeTitleBgColor = Color(0xFF333333)
 private val nodeBorderColor = Color(0xFF555555)
-private val nodeHighlightBorderColor = Color(0xFF42A5F5) // blue highlight for selected node
-private val nodeTextColor = Color(0xFFD4D4D4)
-private val nodeTitleColor = Color(0xFFFFFFFF)
+private val nodeHighlightBorderColor = Color(0xFF42A5F5)
+private val instrHighlightBgColor = Color(0x4442A5F5)
 private val edgeColor = Color(0xFF888888)
-private val edgeTrueColor = Color(0xFF66BB6A)   // green for true/jump branch
-private val edgeFalseColor = Color(0xFFEF5350)  // red for false/fail branch
-private val instrCallColor = Color(0xFF42A5F5)
-private val instrJmpColor = Color(0xFF66BB6A)
-private val instrRetColor = Color(0xFFEF5350)
-private val instrAddrColor = Color(0xFF888888)
-private val instrHighlightBgColor = Color(0x3342A5F5) // translucent blue for selected instruction
+private val edgeTrueColor = Color(0xFF4CAF50)   // Green Jump
+private val edgeFalseColor = Color(0xFFF44336)  // Red Fail
 
-/**
- * Positioned node after layout, with pixel coordinates and size.
- */
 data class LayoutNode(
     val node: GraphNode,
     val x: Float,
     val y: Float,
     val width: Float,
-    val height: Float
+    val height: Float,
+    val layer: Int
 ) {
     val rect: Rect get() = Rect(x, y, x + width, y + height)
+    val centerX: Float get() = x + width / 2f
+    val bottomY: Float get() = y + height
 
     fun instrRect(index: Int): Rect {
         val iy = y + NODE_TITLE_HEIGHT + index * INSTR_LINE_HEIGHT
@@ -91,26 +78,26 @@ data class LayoutNode(
     }
 }
 
-/**
- * A routed edge: a polyline of waypoints for orthogonal drawing.
- */
 data class RoutedEdge(
     val points: List<Offset>,
-    val color: Color,
-    val isBackEdge: Boolean
+    val color: Color
 )
 
-/**
- * Complete layout result including node positions and routed edges.
- */
 data class GraphLayoutResult(
     val nodes: List<LayoutNode>,
     val edges: List<RoutedEdge>
 )
 
-// ── Sugiyama-style layered graph layout ──────────────────────────────────
+// 轨道分配器：用于严格分配平行的走线坐标，direction 决定是往下/往外递增还是递减
+class TrackAllocator(private val base: Float, private val direction: Float = 1f) {
+    private var count = 0
+    fun allocate(): Float {
+        val pos = base + count * direction * TRACK_SPACING
+        count++
+        return pos
+    }
+}
 
-/** Calculate display instruction count (capped). */
 private fun displayInstrCount(node: GraphNode): Int {
     val total = node.instructions.size
     return if (total > MAX_INSTRUCTIONS_PER_NODE) MAX_INSTRUCTIONS_PER_NODE + 1 else total
@@ -126,27 +113,17 @@ private fun nodeWidth(node: GraphNode): Float {
 }
 
 private fun nodeHeight(node: GraphNode): Float {
-    val lines = if (node.instructions.isNotEmpty()) {
-        displayInstrCount(node)
-    } else if (node.body.isNotEmpty()) {
-        1
-    } else {
-        0
-    }
+    val lines = if (node.instructions.isNotEmpty()) displayInstrCount(node) else if (node.body.isNotEmpty()) 1 else 0
     return NODE_TITLE_HEIGHT + lines * INSTR_LINE_HEIGHT + NODE_PADDING
 }
 
-/**
- * Compute a Sugiyama-style layered layout for the graph nodes,
- * then route all edges orthogonally so they don't overlap or cross nodes.
- */
+// ================= 核心布局算法 =================
 fun layoutGraph(data: GraphData): GraphLayoutResult {
     if (data.nodes.isEmpty()) return GraphLayoutResult(emptyList(), emptyList())
 
     val nodeById = data.nodes.associateBy { it.id }
     val allIds = data.nodes.map { it.id }.toSet()
 
-    // Build adjacency: only keep edges to nodes that exist
     val successors = mutableMapOf<Int, MutableList<Int>>()
     val predecessors = mutableMapOf<Int, MutableList<Int>>()
     allIds.forEach { successors[it] = mutableListOf(); predecessors[it] = mutableListOf() }
@@ -157,37 +134,29 @@ fun layoutGraph(data: GraphData): GraphLayoutResult {
         }
     }
 
-    // Step 1: Find back edges via DFS and remove them to make a DAG
     val backEdges = mutableSetOf<Pair<Int, Int>>()
     val visited = mutableSetOf<Int>()
     val onStack = mutableSetOf<Int>()
     fun dfs(u: Int) {
         visited.add(u); onStack.add(u)
         for (v in successors[u].orEmpty()) {
-            if (v in onStack) { backEdges.add(u to v); continue }
-            if (v !in visited) dfs(v)
+            if (v in onStack) backEdges.add(u to v)
+            else if (v !in visited) dfs(v)
         }
         onStack.remove(u)
     }
-    // Start DFS from roots (in-degree 0), then remaining
     val roots = allIds.filter { predecessors[it]!!.isEmpty() }
     (roots.ifEmpty { listOf(data.nodes.first().id) }).forEach { if (it !in visited) dfs(it) }
     allIds.forEach { if (it !in visited) dfs(it) }
 
-    // DAG successors/predecessors (without back edges)
-    val dagSucc = mutableMapOf<Int, MutableList<Int>>()
     val dagPred = mutableMapOf<Int, MutableList<Int>>()
-    allIds.forEach { dagSucc[it] = mutableListOf(); dagPred[it] = mutableListOf() }
+    allIds.forEach { dagPred[it] = mutableListOf() }
     data.nodes.forEach { n ->
         n.outNodes.filter { it in allIds }.forEach { t ->
-            if ((n.id to t) !in backEdges) {
-                dagSucc[n.id]!!.add(t)
-                dagPred[t]!!.add(n.id)
-            }
+            if ((n.id to t) !in backEdges) dagPred[t]!!.add(n.id)
         }
     }
 
-    // Step 2: Longest-path layer assignment (ensures edges point downward)
     val layer = mutableMapOf<Int, Int>()
     fun longestPath(u: Int): Int {
         layer[u]?.let { return it }
@@ -197,38 +166,18 @@ fun layoutGraph(data: GraphData): GraphLayoutResult {
         return l
     }
     allIds.forEach { longestPath(it) }
-
-    // Step 3: Group by layer and order using barycenter heuristic
     val maxLayer = layer.values.maxOrNull() ?: 0
-    val layerNodes = Array(maxLayer + 1) { l ->
-        allIds.filter { layer[it] == l }.toMutableList()
-    }
+    val layerNodes = Array(maxLayer + 1) { l -> allIds.filter { layer[it] == l }.toMutableList() }
 
-    // Barycenter ordering: iterate top-down then bottom-up, several passes
-    repeat(4) {
-        // Top-down pass
-        for (l in 1..maxLayer) {
-            val posInPrev = mutableMapOf<Int, Int>()
-            layerNodes[l - 1].forEachIndexed { i, id -> posInPrev[id] = i }
-            layerNodes[l].sortBy { nodeId ->
-                val preds = dagPred[nodeId].orEmpty().filter { it in posInPrev }
-                if (preds.isEmpty()) Int.MAX_VALUE / 2
-                else preds.sumOf { posInPrev[it]!! } / preds.size
-            }
-        }
-        // Bottom-up pass
-        for (l in maxLayer - 1 downTo 0) {
-            val posInNext = mutableMapOf<Int, Int>()
-            layerNodes[l + 1].forEachIndexed { i, id -> posInNext[id] = i }
-            layerNodes[l].sortBy { nodeId ->
-                val succs = dagSucc[nodeId].orEmpty().filter { it in posInNext }
-                if (succs.isEmpty()) Int.MAX_VALUE / 2
-                else succs.sumOf { posInNext[it]!! } / succs.size
-            }
+    for (l in 1..maxLayer) {
+        val posInPrev = mutableMapOf<Int, Int>()
+        layerNodes[l - 1].forEachIndexed { i, id -> posInPrev[id] = i }
+        layerNodes[l].sortBy { nodeId ->
+            val preds = dagPred[nodeId].orEmpty()
+            if (preds.isEmpty()) 0.0 else preds.sumOf { posInPrev[it] ?: 0 }.toDouble() / preds.size
         }
     }
 
-    // Step 4: Coordinate assignment — center nodes under their connected nodes
     val nodeW = mutableMapOf<Int, Float>()
     val nodeH = mutableMapOf<Int, Float>()
     allIds.forEach { id ->
@@ -237,343 +186,191 @@ fun layoutGraph(data: GraphData): GraphLayoutResult {
         nodeH[id] = nodeHeight(node)
     }
 
-    // Initial X: place nodes sequentially in each layer, centered at 0
     val nodeX = mutableMapOf<Int, Float>()
     val nodeY = mutableMapOf<Int, Float>()
-    var currentY = NODE_PADDING
+    var currentY = 0f
 
     for (l in 0..maxLayer) {
         val ids = layerNodes[l]
-        val totalW = ids.sumOf { nodeW[it]!!.toDouble() }.toFloat() + (ids.size - 1) * NODE_GAP_X
-        var cx = -totalW / 2f
+        var currentX = 0f
         val maxH = ids.maxOfOrNull { nodeH[it]!! } ?: NODE_TITLE_HEIGHT
+        
         for (id in ids) {
-            nodeX[id] = cx
+            nodeX[id] = currentX
             nodeY[id] = currentY
-            cx += nodeW[id]!! + NODE_GAP_X
+            currentX += nodeW[id]!! + NODE_GAP_X
         }
+        
+        val totalWidth = currentX - NODE_GAP_X
+        val shift = -totalWidth / 2f
+        for (id in ids) {
+            nodeX[id] = nodeX[id]!! + shift
+        }
+        
         currentY += maxH + LAYER_GAP_Y
     }
 
-    // Refine X positions: pull nodes toward the average X of their neighbors
-    repeat(8) {
-        // Top-down: shift toward parent centers
-        for (l in 1..maxLayer) {
-            for (id in layerNodes[l]) {
-                val preds = dagPred[id].orEmpty().filter { it in nodeX }
-                if (preds.isNotEmpty()) {
-                    val avgParentCenter = preds.map { nodeX[it]!! + nodeW[it]!! / 2f }.average().toFloat()
-                    val desiredX = avgParentCenter - nodeW[id]!! / 2f
-                    nodeX[id] = nodeX[id]!! + (desiredX - nodeX[id]!!) * 0.5f
-                }
+    for (l in 1..maxLayer) {
+        for (id in layerNodes[l]) {
+            val preds = dagPred[id].orEmpty()
+            if (preds.size == 1) {
+                val p = preds.first()
+                val targetCenter = nodeX[p]!! + nodeW[p]!! / 2f
+                val desiredX = targetCenter - nodeW[id]!! / 2f
+                nodeX[id] = desiredX
             }
-            resolveOverlaps(layerNodes[l], nodeX, nodeW)
         }
-        // Bottom-up: shift toward child centers
-        for (l in maxLayer - 1 downTo 0) {
-            for (id in layerNodes[l]) {
-                val succs = dagSucc[id].orEmpty().filter { it in nodeX }
-                if (succs.isNotEmpty()) {
-                    val avgChildCenter = succs.map { nodeX[it]!! + nodeW[it]!! / 2f }.average().toFloat()
-                    val desiredX = avgChildCenter - nodeW[id]!! / 2f
-                    nodeX[id] = nodeX[id]!! + (desiredX - nodeX[id]!!) * 0.5f
-                }
+        val sorted = layerNodes[l].sortedBy { nodeX[it]!! }
+        for (i in 1 until sorted.size) {
+            val prev = sorted[i - 1]
+            val curr = sorted[i]
+            val minX = nodeX[prev]!! + nodeW[prev]!! + NODE_GAP_X
+            if (nodeX[curr]!! < minX) {
+                nodeX[curr] = minX
             }
-            resolveOverlaps(layerNodes[l], nodeX, nodeW)
         }
     }
 
     val layoutNodesList = allIds.map { id ->
-        LayoutNode(nodeById[id]!!, nodeX[id]!!, nodeY[id]!!, nodeW[id]!!, nodeH[id]!!)
+        LayoutNode(nodeById[id]!!, nodeX[id]!!, nodeY[id]!!, nodeW[id]!!, nodeH[id]!!, layer[id]!!)
     }
     val layoutNodeMap = layoutNodesList.associateBy { it.node.id }
 
-    // ── Edge routing ────────────────────────────────────────────────────────
-    val routedEdges = routeAllEdges(
-        data, layoutNodesList, layoutNodeMap, layer, backEdges
-    )
-
-    return GraphLayoutResult(layoutNodesList, routedEdges)
+    val edges = routeEdgesStrictly(data, layoutNodesList, layoutNodeMap, backEdges)
+    return GraphLayoutResult(layoutNodesList, edges)
 }
 
-// ── Edge routing helpers ────────────────────────────────────────────────────
-
-/** Spacing between parallel edge channels in the gap between layers. */
-private const val EDGE_CHANNEL_GAP = 14f
-/** Minimum margin from node edge for back-edge side routing. */
-private const val BACK_EDGE_MARGIN = 30f
-
-/**
- * Route all edges orthogonally, assigning channels to avoid overlap.
- */
-private fun routeAllEdges(
+// ================= 全新重写的路由算法，彻底解决穿模和箭头重叠 =================
+private fun routeEdgesStrictly(
     data: GraphData,
-    layoutNodes: List<LayoutNode>,
+    nodes: List<LayoutNode>,
     nodeMap: Map<Int, LayoutNode>,
-    layerAssignment: Map<Int, Int>,
-    backEdgeSet: Set<Pair<Int, Int>>
+    backEdges: Set<Pair<Int, Int>>
 ): List<RoutedEdge> {
-    if (layoutNodes.isEmpty()) return emptyList()
+    val routedEdges = mutableListOf<RoutedEdge>()
+    if (nodes.isEmpty()) return emptyList()
 
-    val result = mutableListOf<RoutedEdge>()
+    val graphLeft = nodes.minOf { it.x } - TRACK_SPACING * 3
+    val graphRight = nodes.maxOf { it.x + it.width } + TRACK_SPACING * 3
 
-    // Global bounds for back-edge side routing
-    val globalLeft = layoutNodes.minOf { it.x } - BACK_EDGE_MARGIN
-    val globalRight = layoutNodes.maxOf { it.x + it.width } + BACK_EDGE_MARGIN
+    // 1. 获取每层的物理边界 (Y坐标)
+    val layerTops = mutableMapOf<Int, Float>()
+    val layerBottoms = mutableMapOf<Int, Float>()
+    nodes.groupBy { it.layer }.forEach { (l, lst) ->
+        layerTops[l] = lst.minOf { it.y }
+        layerBottoms[l] = lst.maxOf { it.bottomY }
+    }
 
-    // Track used back-edge channels on left and right sides
-    var nextLeftChannel = 0
-    var nextRightChannel = 0
+    // 2. 准备各类轨道分配器
+    val hExitAllocators = mutableMapOf<Int, TrackAllocator>()
+    val hEntryAllocators = mutableMapOf<Int, TrackAllocator>()
+    
+    // 出口轨道：在层的最底部往下排 (Direction = 1f)
+    layerBottoms.forEach { (l, bottom) -> 
+        hExitAllocators[l] = TrackAllocator(bottom + 12f, 1f) 
+    }
+    // 入口轨道：在层的最顶部往上排 (Direction = -1f)，确保线在节点上方
+    layerTops.forEach { (l, top) -> 
+        hEntryAllocators[l] = TrackAllocator(top - 16f, -1f) 
+    }
 
-    // Collect all edges with metadata
-    data class EdgeMeta(
-        val sourceNode: LayoutNode,
-        val targetNode: LayoutNode,
-        val color: Color,
-        val isBackEdge: Boolean,
-        val portIndex: Int,   // index among siblings from same source
-        val portCount: Int    // total outgoing edges from source
-    )
+    val leftOuterTracks = TrackAllocator(graphLeft, -1f)
+    val rightOuterTracks = TrackAllocator(graphRight, 1f)
 
-    val allEdges = mutableListOf<EdgeMeta>()
+    data class EdgeTask(val src: LayoutNode, val tgt: LayoutNode, val isJump: Boolean, val isFail: Boolean, val isBack: Boolean)
+    val tasks = mutableListOf<EdgeTask>()
 
     for (node in data.nodes) {
-        val srcLayout = nodeMap[node.id] ?: continue
+        val srcNode = nodeMap[node.id] ?: continue
         val lastInstr = node.instructions.lastOrNull()
-        val hasJump = lastInstr?.jump != null
-        val hasFail = lastInstr?.fail != null
-        val validTargets = node.outNodes.mapNotNull { tid -> nodeMap[tid]?.let { tid to it } }
-
-        // Sort targets: true (jump) branch first, then false (fail)
-        val sortedTargets = if (hasJump && hasFail) {
-            validTargets.sortedBy { (tid, tln) ->
-                when (tln.node.address) {
-                    lastInstr.jump -> 0  // true branch first
-                    lastInstr.fail -> 1  // false branch second
-                    else -> 2
-                }
+        val hasBranch = lastInstr?.jump != null && lastInstr.fail != null
+        
+        for (tgtId in node.outNodes) {
+            val tgtNode = nodeMap[tgtId] ?: continue
+            val isBack = (node.id to tgtId) in backEdges || tgtNode.layer <= srcNode.layer
+            
+            var isJump = false
+            var isFail = false
+            if (hasBranch) {
+                if (tgtNode.node.address == lastInstr?.jump) isJump = true
+                else if (tgtNode.node.address == lastInstr?.fail) isFail = true
             }
-        } else {
-            validTargets
+            tasks.add(EdgeTask(srcNode, tgtNode, isJump, isFail, isBack))
+        }
+    }
+
+    // 记录进入目标节点的线的数量，用于分配 X 轴偏移量（防止箭头重叠）
+    val targetEntryCount = mutableMapOf<Int, Int>()
+
+    for (task in tasks) {
+        val src = task.src
+        val tgt = task.tgt
+        val pts = mutableListOf<Offset>()
+        
+        val color = when {
+            task.isJump -> edgeTrueColor
+            task.isFail -> edgeFalseColor
+            else -> edgeColor
         }
 
-        for ((idx, pair) in sortedTargets.withIndex()) {
-            val (targetId, targetLayout) = pair
-            val color = if (hasJump && hasFail) {
-                when (targetLayout.node.address) {
-                    lastInstr.jump -> edgeTrueColor
-                    lastInstr.fail -> edgeFalseColor
-                    else -> edgeColor
-                }
-            } else {
-                edgeColor
+        // --- 起点 X 轴分配 (底部) ---
+        // Jump 偏左出，Fail 偏右出，无条件居中
+        val exitOffset = if (task.isJump) -12f else if (task.isFail) 12f else 0f
+        val startX = src.centerX + exitOffset
+        val startY = src.bottomY
+
+        // --- 终点 X 轴分配 (顶部) ---
+        // 动态分配偏移量，顺序: 0, -10, +10, -20, +20... 完美防止箭头糊在一起
+        val entryIdx = targetEntryCount.getOrDefault(tgt.node.id, 0)
+        targetEntryCount[tgt.node.id] = entryIdx + 1
+        val entryOffset = if (entryIdx == 0) 0f else {
+            val mult = (entryIdx + 1) / 2
+            val sign = if (entryIdx % 2 != 0) -1f else 1f
+            sign * mult * 10f
+        }
+        val endX = tgt.centerX + entryOffset
+        val endY = tgt.y
+
+        pts.add(Offset(startX, startY))
+
+        // --- 核心路由计算 ---
+        if (task.isBack || tgt.layer - src.layer > 1) {
+            // 需要绕到外围的情况（回边循环 / 跨越过层的长线）
+            val isLeftBound = src.centerX < (graphLeft + graphRight) / 2
+            val sideX = if (isLeftBound) leftOuterTracks.allocate() else rightOuterTracks.allocate()
+            
+            // 出口轨道向下，入口轨道向上，绝对不会和节点交叉
+            val exitY = hExitAllocators[src.layer]!!.allocate()
+            val entryY = hEntryAllocators[tgt.layer]!!.allocate()
+
+            pts.add(Offset(startX, exitY)) // 下拉出节点
+            pts.add(Offset(sideX, exitY))  // 走向外围
+            pts.add(Offset(sideX, entryY)) // 在外围长途跋涉到目标上方
+            pts.add(Offset(endX, entryY))  // 走到目标正上方
+            
+        } else {
+            // 相邻层直接相连的情况
+            if (abs(startX - endX) > 2f) {
+                // 不在一条垂直线上，需要走个 Z 字型
+                val midY = hExitAllocators[src.layer]!!.allocate()
+                pts.add(Offset(startX, midY))
+                pts.add(Offset(endX, midY))
             }
-            val isBack = (node.id to targetId) in backEdgeSet
-                    || (node.id == targetId) // self-loop
-            allEdges.add(EdgeMeta(srcLayout, targetLayout, color, isBack, idx, sortedTargets.size))
+            // 如果在一条垂直线上，什么都不加，直接一根线到底
         }
+
+        // 无论何种情况，最后一步绝对是垂直向下进入节点顶部！
+        pts.add(Offset(endX, endY))
+        
+        routedEdges.add(RoutedEdge(pts, color))
     }
 
-    // ── Pre-compute layer Y extents for gap-based routing ──
-    val layerBottomY = mutableMapOf<Int, Float>()
-    val layerTopY = mutableMapOf<Int, Float>()
-    for (ln in layoutNodes) {
-        val l = layerAssignment[ln.node.id] ?: 0
-        layerBottomY[l] = max(layerBottomY.getOrDefault(l, Float.MIN_VALUE), ln.y + ln.height)
-        layerTopY[l] = min(layerTopY.getOrDefault(l, Float.MAX_VALUE), ln.y)
-    }
-
-    // ── Pre-compute incoming port assignments sorted by source X ──
-    val forwardEdges = allEdges.filter { !it.isBackEdge }
-    val incomingByTarget = forwardEdges.groupBy { it.targetNode.node.id }
-    val entryPortIndex = mutableMapOf<Pair<Int, Int>, Int>()
-    val entryPortCount = mutableMapOf<Int, Int>()
-    for ((tgtId, edges) in incomingByTarget) {
-        val sorted = edges.sortedBy { it.sourceNode.x + it.sourceNode.width / 2f }
-        entryPortCount[tgtId] = sorted.size
-        sorted.forEachIndexed { idx, e ->
-            entryPortIndex[e.sourceNode.node.id to tgtId] = idx
-        }
-    }
-
-    // ── Route forward edges ──
-    val gapChannelCounters = mutableMapOf<Int, Int>()
-
-    for (edge in forwardEdges) {
-        val src = edge.sourceNode
-        val tgt = edge.targetNode
-
-        // Exit port: distribute across bottom of source node
-        val exitX = if (edge.portCount <= 1) {
-            src.x + src.width / 2f
-        } else {
-            val spread = src.width * 0.6f
-            val startX = src.x + src.width / 2f - spread / 2f
-            startX + spread * edge.portIndex / (edge.portCount - 1).coerceAtLeast(1)
-        }
-        val exitY = src.y + src.height
-
-        // Entry port: distribute across top of target node
-        val tgtId = tgt.node.id
-        val eCount = entryPortCount[tgtId] ?: 1
-        val eIdx = entryPortIndex[src.node.id to tgtId] ?: 0
-        val entryX = if (eCount <= 1) {
-            tgt.x + tgt.width / 2f
-        } else {
-            val spread = tgt.width * 0.6f
-            val startX = tgt.x + tgt.width / 2f - spread / 2f
-            startX + spread * eIdx / (eCount - 1).coerceAtLeast(1)
-        }
-        val entryY = tgt.y
-
-        val srcLayer = layerAssignment[src.node.id] ?: 0
-        val tgtLayer = layerAssignment[tgt.node.id] ?: 0
-        val layerSpan = tgtLayer - srcLayer
-
-        val points = mutableListOf<Offset>()
-        points.add(Offset(exitX, exitY))
-
-        if (abs(exitX - entryX) < 2f && layerSpan <= 1) {
-            // Straight vertical drop
-            points.add(Offset(entryX, entryY))
-        } else if (layerSpan <= 1) {
-            // Single-layer span: one horizontal jog in the gap
-            val gapTop = layerBottomY[srcLayer] ?: exitY
-            val gapBot = layerTopY[tgtLayer] ?: entryY
-            val channelIdx = gapChannelCounters.getOrDefault(srcLayer, 0)
-            gapChannelCounters[srcLayer] = channelIdx + 1
-            val gapMid = (gapTop + gapBot) / 2f
-            val midY = (gapMid + (channelIdx - channelIdx / 2f) * EDGE_CHANNEL_GAP *
-                    (if (channelIdx % 2 == 0) 1f else -1f))
-                .coerceIn(gapTop + 4f, gapBot - 4f)
-            points.add(Offset(exitX, midY))
-            points.add(Offset(entryX, midY))
-            points.add(Offset(entryX, entryY))
-        } else {
-            // Multi-layer span: route through each intermediate gap
-            var currentX = exitX
-            for (gap in srcLayer until tgtLayer) {
-                val gapTop = layerBottomY[gap] ?: exitY
-                val gapBot = layerTopY[gap + 1] ?: entryY
-                val channelIdx = gapChannelCounters.getOrDefault(gap, 0)
-                gapChannelCounters[gap] = channelIdx + 1
-                val gapMid = (gapTop + gapBot) / 2f
-                val midY = (gapMid + (channelIdx - channelIdx / 2f) * EDGE_CHANNEL_GAP *
-                        (if (channelIdx % 2 == 0) 1f else -1f))
-                    .coerceIn(gapTop + 4f, gapBot - 4f)
-
-                val nextX = if (gap == tgtLayer - 1) entryX else {
-                    val progress = (gap - srcLayer + 1).toFloat() / layerSpan
-                    exitX + (entryX - exitX) * progress
-                }
-                if (abs(currentX - nextX) >= 2f) {
-                    points.add(Offset(currentX, midY))
-                    points.add(Offset(nextX, midY))
-                } else {
-                    points.add(Offset(currentX, midY))
-                }
-                currentX = nextX
-            }
-            points.add(Offset(entryX, entryY))
-        }
-
-        result.add(RoutedEdge(points, edge.color, isBackEdge = false))
-    }
-
-    // ── Route back edges (loops) ──
-    for (edge in allEdges) {
-        if (!edge.isBackEdge) continue
-
-        val src = edge.sourceNode
-        val tgt = edge.targetNode
-
-        if (src.node.id == tgt.node.id) {
-            // Self-loop: route on the right side of the node
-            val channel = nextRightChannel++
-            val sideX = src.x + src.width + BACK_EDGE_MARGIN + channel * EDGE_CHANNEL_GAP
-            val exitY = src.y + src.height * 0.6f
-            val entryY = src.y + src.height * 0.3f
-            result.add(RoutedEdge(
-                listOf(
-                    Offset(src.x + src.width, exitY),
-                    Offset(sideX, exitY),
-                    Offset(sideX, entryY),
-                    Offset(src.x + src.width, entryY)
-                ),
-                edge.color,
-                isBackEdge = true
-            ))
-        } else {
-            // Back edge going upward: route along the side of the graph
-            // Choose left or right side based on which is closer to both endpoints
-            val srcCenterX = src.x + src.width / 2f
-            val tgtCenterX = tgt.x + tgt.width / 2f
-            val avgX = (srcCenterX + tgtCenterX) / 2f
-            val graphCenterX = (globalLeft + globalRight) / 2f
-
-            val useRight = avgX >= graphCenterX
-            if (useRight) {
-                val channel = nextRightChannel++
-                val sideX = globalRight + channel * EDGE_CHANNEL_GAP
-                val exitX = src.x + src.width
-                val exitY = src.y + src.height / 2f
-                val entryX = tgt.x + tgt.width
-                val entryY = tgt.y + NODE_TITLE_HEIGHT / 2f
-                result.add(RoutedEdge(
-                    listOf(
-                        Offset(exitX, exitY),
-                        Offset(sideX, exitY),
-                        Offset(sideX, entryY),
-                        Offset(entryX, entryY)
-                    ),
-                    edge.color,
-                    isBackEdge = true
-                ))
-            } else {
-                val channel = nextLeftChannel++
-                val sideX = globalLeft - channel * EDGE_CHANNEL_GAP
-                val exitX = src.x
-                val exitY = src.y + src.height / 2f
-                val entryX = tgt.x
-                val entryY = tgt.y + NODE_TITLE_HEIGHT / 2f
-                result.add(RoutedEdge(
-                    listOf(
-                        Offset(exitX, exitY),
-                        Offset(sideX, exitY),
-                        Offset(sideX, entryY),
-                        Offset(entryX, entryY)
-                    ),
-                    edge.color,
-                    isBackEdge = true
-                ))
-            }
-        }
-    }
-
-    return result
+    return routedEdges
 }
 
-/** Push overlapping nodes apart within a layer while preserving order. */
-private fun resolveOverlaps(
-    ids: List<Int>,
-    nodeX: MutableMap<Int, Float>,
-    nodeW: MutableMap<Int, Float>
-) {
-    if (ids.size < 2) return
-    val sorted = ids.sortedBy { nodeX[it]!! }
-    for (i in 1 until sorted.size) {
-        val prev = sorted[i - 1]
-        val curr = sorted[i]
-        val minX = nodeX[prev]!! + nodeW[prev]!! + NODE_GAP_X
-        if (nodeX[curr]!! < minX) {
-            nodeX[curr] = minX
-        }
-    }
-}
 
-/**
- * Interactive graph viewer with pan, zoom, tap-on-node, and cursor highlight.
- */
+// ================= Compose UI 渲染层 =================
+
 @Composable
 fun GraphViewer(
     graphData: GraphData,
@@ -588,17 +385,13 @@ fun GraphViewer(
     val density = LocalDensity.current
     val layoutResult = remember(graphData) { layoutGraph(graphData) }
     val layoutNodes = layoutResult.nodes
-    val nodeById = remember(layoutNodes) { layoutNodes.associateBy { it.node.id } }
 
-    // Find the node containing the cursor address (for highlight)
     val highlightNodeId = remember(layoutNodes, cursorAddress) {
         layoutNodes.firstOrNull { ln ->
-            ln.node.address == cursorAddress ||
-            ln.node.instructions.any { it.addr == cursorAddress }
+            ln.node.address == cursorAddress || ln.node.instructions.any { it.addr == cursorAddress }
         }?.node?.id
     }
 
-    // Compute graph bounding box (include edge waypoints for back-edge channels)
     val graphBounds = remember(layoutResult) {
         if (layoutResult.nodes.isEmpty()) Rect.Zero
         else {
@@ -606,7 +399,6 @@ fun GraphViewer(
             var minY = layoutResult.nodes.minOf { it.y }
             var maxX = layoutResult.nodes.maxOf { it.x + it.width }
             var maxY = layoutResult.nodes.maxOf { it.y + it.height }
-            // Expand bounds to include routed edge waypoints
             for (edge in layoutResult.edges) {
                 for (pt in edge.points) {
                     if (pt.x < minX) minX = pt.x
@@ -615,26 +407,21 @@ fun GraphViewer(
                     if (pt.y > maxY) maxY = pt.y
                 }
             }
-            Rect(minX - 50f, minY - 50f, maxX + 50f, maxY + 50f)
+            Rect(minX - 100f, minY - 100f, maxX + 100f, maxY + 100f)
         }
     }
 
-    // Track viewport size for proper pan clamping
     var viewportSize by remember { mutableStateOf(Size.Zero) }
-
-    // Pan & zoom state — initialScale comes from parent to survive graph reloads
     var scale by remember { mutableFloatStateOf(initialScale) }
     var offset by remember(graphBounds) {
         val centerX = -(graphBounds.left + graphBounds.right) / 2f
-        val centerY = -graphBounds.top // align top of graph near top of viewport
+        val centerY = -graphBounds.top
         mutableStateOf(Offset(centerX, centerY))
     }
 
-    /** Clamp offset so the entire graph remains reachable. */
     fun clampOffset(off: Offset, s: Float): Offset {
         val vw = if (viewportSize.width > 0f) viewportSize.width else 1080f
         val vh = if (viewportSize.height > 0f) viewportSize.height else 1920f
-        // Allow panning so any edge of the graph can reach the viewport center
         val minOx = -graphBounds.right * s - vw / 2f
         val maxOx = -graphBounds.left * s + vw / 2f
         val minOy = -graphBounds.bottom * s - vh / 2f
@@ -642,34 +429,27 @@ fun GraphViewer(
         return Offset(off.x.coerceIn(minOx, maxOx), off.y.coerceIn(minOy, maxOy))
     }
 
-
-    // Scroll-to-selection: pan to the highlighted node, or graph center if none
     val scrollTrigger by scrollToSelectionTrigger.collectAsState()
     LaunchedEffect(scrollTrigger) {
         if (scrollTrigger > 0) {
             val ln = highlightNodeId?.let { id -> layoutNodes.firstOrNull { it.node.id == id } }
-            val centerX = if (ln != null) ln.x + ln.width / 2f else (graphBounds.left + graphBounds.right) / 2f
+            val centerX = if (ln != null) ln.centerX else (graphBounds.left + graphBounds.right) / 2f
             val centerY = if (ln != null) ln.y + ln.height / 2f else (graphBounds.top + graphBounds.bottom) / 2f
             offset = clampOffset(Offset(-centerX * scale, -centerY * scale), scale)
         }
     }
 
-    // Context menu state
     var menuVisible by remember { mutableStateOf(false) }
     var menuPosition by remember { mutableStateOf(DpOffset.Zero) }
     var menuInstr by remember { mutableStateOf<GraphBlockInstruction?>(null) }
     var menuNodeTitle by remember { mutableStateOf("") }
     var menuNodeAddress by remember { mutableLongStateOf(0L) }
-
-    // Hoist context for clipboard operations
     val context = LocalContext.current
 
-    // Native paint for text — raw pixel units to match layout constants.
-    // Pinch-to-zoom handles readability on different screen sizes.
     val textPaint = remember {
         android.graphics.Paint().apply {
             color = "#D4D4D4".toColorInt()
-            textSize = 16f
+            textSize = 14f
             typeface = android.graphics.Typeface.MONOSPACE
             isAntiAlias = true
         }
@@ -677,7 +457,7 @@ fun GraphViewer(
     val titlePaint = remember {
         android.graphics.Paint().apply {
             color = android.graphics.Color.WHITE
-            textSize = 18f
+            textSize = 15f
             typeface = android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
             isAntiAlias = true
         }
@@ -685,15 +465,7 @@ fun GraphViewer(
     val addrPaint = remember {
         android.graphics.Paint().apply {
             color = "#888888".toColorInt()
-            textSize = 14f
-            typeface = android.graphics.Typeface.MONOSPACE
-            isAntiAlias = true
-        }
-    }
-    val truncPaint = remember {
-        android.graphics.Paint().apply {
-            color = "#FFCA28".toColorInt()
-            textSize = 14f
+            textSize = 13f
             typeface = android.graphics.Typeface.MONOSPACE
             isAntiAlias = true
         }
@@ -703,14 +475,13 @@ fun GraphViewer(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF1E1E1E))
+                .background(Color(0xFF161616))
                 .pointerInput(Unit) {
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         val oldScale = scale
                         val newScale = (oldScale * zoom).coerceIn(0.15f, 5f)
                         val cx = size.width / 2f
                         val cy = size.height / 2f
-                        // Keep the graph point under the centroid stationary
                         val centroidRel = Offset(centroid.x - cx, centroid.y - cy)
                         val newOffset = centroidRel - (centroidRel - offset) * (newScale / oldScale) + pan
                         scale = newScale
@@ -734,21 +505,16 @@ fun GraphViewer(
                                             menuInstr = instr
                                             menuNodeTitle = ln.node.title
                                             menuNodeAddress = ln.node.address
-                                            menuPosition = with(density) {
-                                                DpOffset(tapOffset.x.toDp(), tapOffset.y.toDp())
-                                            }
+                                            menuPosition = with(density) { DpOffset(tapOffset.x.toDp(), tapOffset.y.toDp()) }
                                             menuVisible = true
                                             return@detectTapGestures
                                         }
                                     }
                                 }
-                                // Node-level tap (agrj nodes or title area)
                                 menuInstr = null
                                 menuNodeTitle = ln.node.title
                                 menuNodeAddress = ln.node.address
-                                menuPosition = with(density) {
-                                    DpOffset(tapOffset.x.toDp(), tapOffset.y.toDp())
-                                }
+                                menuPosition = with(density) { DpOffset(tapOffset.x.toDp(), tapOffset.y.toDp()) }
                                 menuVisible = true
                                 return@detectTapGestures
                             }
@@ -756,7 +522,6 @@ fun GraphViewer(
                     }
                 }
         ) {
-            // Capture viewport size for pan clamping
             viewportSize = size
             val cx = size.width / 2f
             val cy = size.height / 2f
@@ -765,133 +530,65 @@ fun GraphViewer(
                 translate(cx + offset.x, cy + offset.y)
                 scale(scale, scale, Offset.Zero)
             }) {
+                // 先画线，让线在节点底层，视觉上更清晰
                 drawRoutedEdges(layoutResult.edges)
 
                 for (ln in layoutNodes) {
                     val isHighlighted = ln.node.id == highlightNodeId
-                    drawNode(ln, textPaint, titlePaint, addrPaint, truncPaint, density.density, isHighlighted, cursorAddress)
+                    drawNode(ln, textPaint, titlePaint, addrPaint, density.density, isHighlighted, cursorAddress)
                 }
             }
         }
 
-        // Context menu dropdown
-        DropdownMenu(
-            expanded = menuVisible,
-            onDismissRequest = { menuVisible = false },
-            offset = menuPosition
-        ) {
+        DropdownMenu(expanded = menuVisible, onDismissRequest = { menuVisible = false }, offset = menuPosition) {
             val instr = menuInstr
             if (instr != null) {
-                // Jump to address
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.menu_jump) + " → 0x%X".format(instr.addr)) },
-                    onClick = {
-                        menuVisible = false
-                        onAddressClick(instr.addr)
-                    }
-                )
-                // Copy address
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.menu_copy) + " " + stringResource(R.string.menu_address)) },
-                    onClick = {
-                        menuVisible = false
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(
-                            android.content.ClipData.newPlainText("address", "0x%X".format(instr.addr))
-                        )
-                    }
-                )
-                // Copy disasm
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.menu_copy) + " " + stringResource(R.string.menu_opcodes)) },
-                    onClick = {
-                        menuVisible = false
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(
-                            android.content.ClipData.newPlainText("disasm", instr.disasm)
-                        )
-                    }
-                )
-                // Jump target if it's a jump/call
+                DropdownMenuItem(text = { Text(stringResource(R.string.menu_jump) + " → 0x%X".format(instr.addr)) }, onClick = { menuVisible = false; onAddressClick(instr.addr) })
+                DropdownMenuItem(text = { Text(stringResource(R.string.menu_copy) + " " + stringResource(R.string.menu_address)) }, onClick = {
+                    menuVisible = false
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("address", "0x%X".format(instr.addr)))
+                })
+                DropdownMenuItem(text = { Text(stringResource(R.string.menu_copy) + " " + stringResource(R.string.menu_opcodes)) }, onClick = {
+                    menuVisible = false
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("disasm", instr.disasm))
+                })
                 if (instr.jump != null) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.menu_jump) + " → 0x%X".format(instr.jump)) },
-                        onClick = {
-                            menuVisible = false
-                            onAddressClick(instr.jump)
-                        }
-                    )
+                    DropdownMenuItem(text = { Text(stringResource(R.string.menu_jump) + " → 0x%X".format(instr.jump)) }, onClick = { menuVisible = false; onAddressClick(instr.jump) })
                 }
-                // Cross References
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.menu_graph_xrefs)) },
-                    onClick = {
-                        menuVisible = false
-                        onShowXrefs(instr.addr)
-                    }
-                )
-                // Instruction Detail
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.menu_graph_detail)) },
-                    onClick = {
-                        menuVisible = false
-                        onShowInstructionDetail(instr.addr)
-                    }
-                )
+                DropdownMenuItem(text = { Text(stringResource(R.string.menu_graph_xrefs)) }, onClick = { menuVisible = false; onShowXrefs(instr.addr) })
+                DropdownMenuItem(text = { Text(stringResource(R.string.menu_graph_detail)) }, onClick = { menuVisible = false; onShowInstructionDetail(instr.addr) })
             } else {
-                // Node-level menu (for agrj nodes without instructions)
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.menu_jump) + " → $menuNodeTitle") },
-                    onClick = { menuVisible = false }
-                )
-                // Cross References for node address
+                DropdownMenuItem(text = { Text(stringResource(R.string.menu_jump) + " → $menuNodeTitle") }, onClick = { menuVisible = false })
                 if (menuNodeAddress != 0L) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.menu_graph_xrefs)) },
-                        onClick = {
-                            menuVisible = false
-                            onShowXrefs(menuNodeAddress)
-                        }
-                    )
+                    DropdownMenuItem(text = { Text(stringResource(R.string.menu_graph_xrefs)) }, onClick = { menuVisible = false; onShowXrefs(menuNodeAddress) })
                 }
             }
         }
     }
 }
 
-/**
- * Draw all pre-routed edges as orthogonal polylines with arrowheads.
- */
 private fun DrawScope.drawRoutedEdges(edges: List<RoutedEdge>) {
     for (edge in edges) {
         val pts = edge.points
         if (pts.size < 2) continue
 
-        // Draw polyline segments
-        for (i in 0 until pts.size - 1) {
-            drawLine(
-                color = edge.color,
-                start = pts[i],
-                end = pts[i + 1],
-                strokeWidth = 2f
-            )
+        val path = Path().apply {
+            moveTo(pts.first().x, pts.first().y)
+            for (i in 1 until pts.size) {
+                lineTo(pts[i].x, pts[i].y)
+            }
         }
+        drawPath(path, edge.color, style = Stroke(width = 1.5f))
 
-        // Draw arrowhead at the last segment's tip
         val tip = pts.last()
         val from = pts[pts.size - 2]
         drawArrowHead(tip, from, edge.color)
-
-        // Draw endpoint dots for visual clarity
-        drawCircle(color = edge.color, radius = 3.5f, center = pts.first())
     }
 }
 
-/**
- * Draw an arrowhead pointing from `from` toward `tip`.
- */
+// 修改了箭头逻辑，使其完美贴合并且向后延伸，绝对不会越过 y 轴界限进入节点内部
 private fun DrawScope.drawArrowHead(tip: Offset, from: Offset, color: Color) {
     val dx = tip.x - from.x
     val dy = tip.y - from.y
@@ -904,8 +601,8 @@ private fun DrawScope.drawArrowHead(tip: Offset, from: Offset, color: Color) {
     val baseX = tip.x - ux * ARROW_SIZE
     val baseY = tip.y - uy * ARROW_SIZE
 
-    val perpX = -uy * ARROW_SIZE * 0.6f
-    val perpY = ux * ARROW_SIZE * 0.6f
+    val perpX = -uy * ARROW_SIZE * 0.4f
+    val perpY = ux * ARROW_SIZE * 0.4f
 
     val path = Path().apply {
         moveTo(tip.x, tip.y)
@@ -913,25 +610,21 @@ private fun DrawScope.drawArrowHead(tip: Offset, from: Offset, color: Color) {
         lineTo(baseX - perpX, baseY - perpY)
         close()
     }
+    // 使用 Fill 绘制实心箭头更清晰
     drawPath(path, color)
 }
 
-/**
- * Draw a single graph node: rounded rect background, title bar, and instruction lines.
- */
 private fun DrawScope.drawNode(
     ln: LayoutNode,
     textPaint: android.graphics.Paint,
     titlePaint: android.graphics.Paint,
     addrPaint: android.graphics.Paint,
-    truncPaint: android.graphics.Paint,
     density: Float,
     isHighlighted: Boolean = false,
     cursorAddress: Long = 0L
 ) {
     val cornerRadius = NODE_CORNER_RADIUS * density
 
-    // Node background
     drawRoundRect(
         color = nodeBgColor,
         topLeft = Offset(ln.x, ln.y),
@@ -939,7 +632,6 @@ private fun DrawScope.drawNode(
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadius)
     )
 
-    // Title bar background
     drawRoundRect(
         color = nodeTitleBgColor,
         topLeft = Offset(ln.x, ln.y),
@@ -947,7 +639,6 @@ private fun DrawScope.drawNode(
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadius)
     )
 
-    // Clip bottom corners of title (draw rect over bottom half)
     if (ln.node.instructions.isNotEmpty() || ln.node.body.isNotEmpty()) {
         drawRect(
             color = nodeTitleBgColor,
@@ -956,17 +647,14 @@ private fun DrawScope.drawNode(
         )
     }
 
-
-    // Node border — highlighted if selected
     drawRoundRect(
         color = if (isHighlighted) nodeHighlightBorderColor else nodeBorderColor,
         topLeft = Offset(ln.x, ln.y),
         size = Size(ln.width, ln.height),
         cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadius),
-        style = Stroke(width = if (isHighlighted) 3f else 1.5f)
+        style = Stroke(width = if (isHighlighted) 2.5f else 1f)
     )
 
-    // Title text — vertically centered in title bar
     drawContext.canvas.nativeCanvas.drawText(
         ln.node.title,
         ln.x + NODE_PADDING,
@@ -974,97 +662,46 @@ private fun DrawScope.drawNode(
         titlePaint
     )
 
-    // Instructions or body
     if (ln.node.instructions.isNotEmpty()) {
-        drawInstructions(ln, textPaint, addrPaint, truncPaint, density, cursorAddress)
+        val canvas = drawContext.canvas.nativeCanvas
+        val instrPaint = android.graphics.Paint(textPaint)
+        val visibleInstrs = ln.node.instructions.take(MAX_INSTRUCTIONS_PER_NODE)
+
+        visibleInstrs.forEachIndexed { idx, instr ->
+            val lineY = ln.y + NODE_TITLE_HEIGHT + (idx + 0.5f) * INSTR_LINE_HEIGHT + instrPaint.textSize / 3f
+
+            if (instr.addr == cursorAddress) {
+                drawRect(
+                    color = instrHighlightBgColor,
+                    topLeft = Offset(ln.x, ln.y + NODE_TITLE_HEIGHT + idx * INSTR_LINE_HEIGHT),
+                    size = Size(ln.width, INSTR_LINE_HEIGHT)
+                )
+            }
+            
+            val addrText = "%X".format(instr.addr)
+            canvas.drawText(addrText, ln.x + NODE_PADDING, lineY, addrPaint)
+
+            instrPaint.color = when (instr.type) {
+                "call", "ucall", "ircall" -> "#569CD6".toColorInt()
+                "jmp", "cjmp", "ujmp" -> "#4CAF50".toColorInt()
+                "ret" -> "#F44336".toColorInt()
+                "push", "pop", "rpush" -> "#C586C0".toColorInt()
+                "cmp", "test", "acmp" -> "#DCDCAA".toColorInt()
+                "nop" -> android.graphics.Color.GRAY
+                else -> "#D4D4D4".toColorInt()
+            }
+
+            val addrWidth = addrPaint.measureText(addrText)
+            val disasmX = ln.x + NODE_PADDING + addrWidth + ADDR_DISASM_GAP * density
+            
+            canvas.drawText(instr.disasm, disasmX, lineY, instrPaint)
+        }
     } else if (ln.node.body.isNotEmpty()) {
         drawContext.canvas.nativeCanvas.drawText(
             ln.node.body,
             ln.x + NODE_PADDING,
             ln.y + NODE_TITLE_HEIGHT + INSTR_LINE_HEIGHT / 2f + textPaint.textSize / 3f,
             textPaint
-        )
-    }
-}
-
-/**
- * Draw instruction lines inside a node with color-coded opcodes.
- * Caps at MAX_INSTRUCTIONS_PER_NODE and shows truncation indicator.
- */
-private fun DrawScope.drawInstructions(
-    ln: LayoutNode,
-    textPaint: android.graphics.Paint,
-    addrPaint: android.graphics.Paint,
-    truncPaint: android.graphics.Paint,
-    density: Float,
-    cursorAddress: Long = 0L
-) {
-    val canvas = drawContext.canvas.nativeCanvas
-    val instrPaint = android.graphics.Paint(textPaint)
-
-    val totalInstrs = ln.node.instructions.size
-    val visibleInstrs = ln.node.instructions.take(MAX_INSTRUCTIONS_PER_NODE)
-
-    visibleInstrs.forEachIndexed { idx, instr ->
-        val lineY = ln.y + NODE_TITLE_HEIGHT + (idx + 0.5f) * INSTR_LINE_HEIGHT + instrPaint.textSize / 3f
-
-        // Highlight the selected instruction row
-        if (instr.addr == cursorAddress) {
-            drawRect(
-                color = instrHighlightBgColor,
-                topLeft = Offset(ln.x, ln.y + NODE_TITLE_HEIGHT + idx * INSTR_LINE_HEIGHT),
-                size = Size(ln.width, INSTR_LINE_HEIGHT)
-            )
-        }
-        val addrText = "%X".format(instr.addr)
-
-        // Draw address
-        canvas.drawText(
-            addrText,
-            ln.x + NODE_PADDING,
-            lineY,
-            addrPaint
-        )
-
-        // Color-code the disasm based on instruction type
-        instrPaint.color = when (instr.type) {
-            "call", "ucall", "ircall" -> "#42A5F5".toColorInt()
-            "jmp", "cjmp", "ujmp" -> "#66BB6A".toColorInt()
-            "ret" -> "#EF5350".toColorInt()
-            "push", "pop", "rpush" -> "#AB47BC".toColorInt()
-            "cmp", "test", "acmp" -> "#FFCA28".toColorInt()
-            "nop" -> android.graphics.Color.GRAY
-            else -> "#D4D4D4".toColorInt()
-        }
-
-        // Draw disasm text with gap after address
-        val addrWidth = addrPaint.measureText(addrText)
-        val disasmX = ln.x + NODE_PADDING + addrWidth + ADDR_DISASM_GAP * density
-
-        // Truncate disasm text if it exceeds node width
-        val availableWidth = ln.x + ln.width - NODE_PADDING - disasmX
-        val disasmText = if (instrPaint.measureText(instr.disasm) > availableWidth && availableWidth > 0) {
-            var truncated = instr.disasm
-            while (truncated.isNotEmpty() && instrPaint.measureText("$truncated…") > availableWidth) {
-                truncated = truncated.dropLast(1)
-            }
-            "$truncated…"
-        } else {
-            instr.disasm
-        }
-
-        canvas.drawText(disasmText, disasmX, lineY, instrPaint)
-    }
-
-    // Draw truncation indicator if needed
-    if (totalInstrs > MAX_INSTRUCTIONS_PER_NODE) {
-        val remaining = totalInstrs - MAX_INSTRUCTIONS_PER_NODE
-        val truncY = ln.y + NODE_TITLE_HEIGHT + (MAX_INSTRUCTIONS_PER_NODE + 0.5f) * INSTR_LINE_HEIGHT + truncPaint.textSize / 3f
-        canvas.drawText(
-            "... $remaining more instructions",
-            ln.x + NODE_PADDING,
-            truncY,
-            truncPaint
         )
     }
 }

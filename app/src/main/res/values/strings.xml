@@ -7,7 +7,7 @@
     <string name="home_open_file_title">Open</string>
     <string name="home_open_file_desc">Select binary to analyze</string>
     <string name="home_features_title">Features</string>
-    <string name="home_features_desc">Go to Explore more tools</string>
+    <string name="home_features_desc">Explore more tools</string>
     <string name="home_recent_projects">Recent Projects</string>
     <string name="home_saved_projects">Saved Projects</string>
     <string name="home_no_recent_projects">No recent projects</string>
@@ -650,6 +650,9 @@
     <string name="plugin_developer_plugin_description">Description</string>
     <string name="plugin_developer_create_confirm">Create</string>
     <string name="plugin_developer_create_cancel">Cancel</string>
+    <string name="plugin_incompatible_version_title">Incompatible Plugin Version</string>
+    <string name="plugin_incompatible_version_message">Plugin "%1$s" requires r2droid %2$s or later. Current version: %3$s.</string>
+    <string name="plugin_incompatible_version_confirm">Got it</string>
     <string name="features_custom_start_dialog_title">Custom R2 Command</string>
     <string name="features_custom_start_hint">Full command</string>
     <string name="features_custom_start_examples">e.g. r2 -  or  r2 \"frida://attach/pid\"</string>

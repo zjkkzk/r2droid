@@ -281,6 +281,9 @@ private fun PluginListTab(
     val expandedDescriptions = remember { mutableStateMapOf<String, Boolean>() }
     val expandableDescriptions = remember { mutableStateMapOf<String, Boolean>() }
     var pendingDeletePlugin by remember { mutableStateOf<InstalledPlugin?>(null) }
+    var pendingIncompatibleInstall by remember {
+        mutableStateOf<Pair<PluginIndexEntry, PluginVersionCompatibility>?>(null)
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -467,6 +470,11 @@ private fun PluginListTab(
                     } else {
                         Button(
                             onClick = {
+                                val compatibility = PluginManager.getVersionCompatibility(item.indexEntry)
+                                if (!compatibility.compatible) {
+                                    pendingIncompatibleInstall = item.indexEntry to compatibility
+                                    return@Button
+                                }
                                 if (shouldUpdate) {
                                     onUpdate(item.indexEntry.id)
                                 } else {
@@ -504,6 +512,30 @@ private fun PluginListTab(
             dismissButton = {
                 TextButton(onClick = { pendingDeletePlugin = null }) {
                     Text(stringResource(R.string.plugin_developer_create_cancel))
+                }
+            }
+        )
+    }
+    val incompatibleInstall = pendingIncompatibleInstall
+    if (incompatibleInstall != null) {
+        val (entry, compatibility) = incompatibleInstall
+        val minVersion = compatibility.minVersion.orEmpty().ifBlank { "?" }
+        AlertDialog(
+            onDismissRequest = { pendingIncompatibleInstall = null },
+            title = { Text(stringResource(R.string.plugin_incompatible_version_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.plugin_incompatible_version_message,
+                        entry.name,
+                        minVersion,
+                        compatibility.currentVersion
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { pendingIncompatibleInstall = null }) {
+                    Text(stringResource(R.string.plugin_incompatible_version_confirm))
                 }
             }
         )

@@ -1,7 +1,9 @@
 package top.wsdx233.r2droid.feature.plugin
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -139,6 +141,7 @@ object PluginManager {
         runCatching {
             stagedDir.deleteRecursively()
             backupDir.deleteRecursively()
+            ensureEntryVersionCompatible(entry)
 
             downloadFile(entry.downloadUrl, tempZip) { progress ->
                 updateInstallProgress(entry.id, 0.05f + progress * 0.55f)
@@ -507,6 +510,19 @@ object PluginManager {
 
     fun clearLogs() {
         _logs.value = emptyList()
+    }
+
+    fun getVersionCompatibility(entry: PluginIndexEntry): PluginVersionCompatibility {
+        val minVersion = entry.minVersion?.trim()?.ifBlank { null }
+        val currentVersion = runCatching { currentAppVersionName() }.getOrElse { "unknown" }
+        if (currentVersion.equals("unknown", ignoreCase = true)) {
+            return PluginVersionCompatibility(
+                minVersion = minVersion,
+                currentVersion = currentVersion,
+                compatible = true
+            )
+        }
+        return buildVersionCompatibility(minVersion, currentVersion)
     }
 
     fun findInstalledPlugin(pluginId: String): InstalledPlugin? {
@@ -972,6 +988,39 @@ object PluginManager {
                 json.decodeFromString(PluginIndex.serializer(), File(source).readText())
             }
         }
+    }
+
+    private fun ensureEntryVersionCompatible(entry: PluginIndexEntry) {
+        val compatibility = getVersionCompatibility(entry)
+        if (!compatibility.compatible) {
+            throw IllegalStateException(
+                "plugin ${entry.id} requires r2droid >= ${compatibility.minVersion}, current=${compatibility.currentVersion}"
+            )
+        }
+    }
+
+    private fun buildVersionCompatibility(minVersionRaw: String?, currentVersionRaw: String): PluginVersionCompatibility {
+        val minVersion = minVersionRaw?.trim()?.ifBlank { null }
+        val currentVersion = currentVersionRaw.trim().ifBlank { "0" }
+        val compatible = minVersion?.let { compareVersion(it, currentVersion) <= 0 } ?: true
+        return PluginVersionCompatibility(
+            minVersion = minVersion,
+            currentVersion = currentVersion,
+            compatible = compatible
+        )
+    }
+
+    private fun currentAppVersionName(): String {
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.packageManager.getPackageInfo(
+                appContext.packageName,
+                PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+        }
+        return packageInfo.versionName?.trim().orEmpty().ifBlank { "0" }
     }
 
     private fun compareVersion(a: String, b: String): Int {
