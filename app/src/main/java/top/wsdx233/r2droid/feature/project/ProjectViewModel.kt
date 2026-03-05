@@ -157,6 +157,10 @@ class ProjectViewModel @Inject constructor(
     private val functionDao: FunctionDao
 ) : ViewModel() {
 
+    // Track current r2 session token. It increments on open/switch/close.
+    // Used to detect sidebar session switching and refresh all project-scoped data.
+    private var observedSessionToken: Int = -1
+
     private val _uiState = MutableStateFlow<ProjectUiState>(ProjectUiState.Idle)
     val uiState: StateFlow<ProjectUiState> = _uiState.asStateFlow()
 
@@ -461,7 +465,24 @@ class ProjectViewModel @Inject constructor(
         // in simple navigation setups (Activity-scoped ViewModel)
     }
 
+    private fun onSessionSwitchedIfNeeded(): Boolean {
+        val token = R2PipeManager.sessionId
+        if (token == observedSessionToken) return false
+        observedSessionToken = token
+
+        // Reset session-scoped UI/cache state to avoid showing old project's data
+        currentOffset = 0L
+        addressHistory.clear()
+        _canGoBack.value = false
+        _historyState.value = HistoryState()
+
+        _uiState.value = ProjectUiState.Loading
+        _saveProjectState.value = SaveProjectState.Idle
+        return true
+    }
+
     fun initialize() {
+        val sessionChanged = onSessionSwitchedIfNeeded()
         val path = R2PipeManager.pendingFilePath
         val restoreFlags = R2PipeManager.pendingRestoreFlags
         val customCmd = R2PipeManager.pendingCustomCommand
@@ -481,9 +502,17 @@ class ProjectViewModel @Inject constructor(
              // No new file pending.
              // If we are already displaying data (Success), do nothing.
              // If we are Idle/Error, try to recover session if connected.
-             if (_uiState.value is ProjectUiState.Idle || _uiState.value is ProjectUiState.Error) {
+             if (sessionChanged || _uiState.value is ProjectUiState.Idle || _uiState.value is ProjectUiState.Error) {
                  if (R2PipeManager.isConnected) {
-                    loadOverview()
+                    if (R2PipeManager.isR2FridaSession) {
+                        // r2frida 会话不支持标准 iIj 概览，切换会话时直接进入 Success 状态
+                        _uiState.value = ProjectUiState.Success(
+                            binInfo = null,
+                            cursorAddress = currentOffset
+                        )
+                    } else {
+                        loadOverview()
+                    }
                 } else {
                      _uiState.value = ProjectUiState.Error("No file selected or session active")
                 }

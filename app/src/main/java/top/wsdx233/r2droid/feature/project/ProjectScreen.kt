@@ -195,8 +195,8 @@ fun ProjectScreen(
             var exitProjectName by remember { mutableStateOf("") }
             var pendingExitOnSave by remember { mutableStateOf(false) }
 
-            // Initialize intent
-            androidx.compose.runtime.LaunchedEffect(Unit) {
+            // Re-initialize when active session changes (e.g. switched from sidebar)
+            androidx.compose.runtime.LaunchedEffect(activeSessionId) {
                 viewModel.onEvent(ProjectEvent.Initialize)
             }
 
