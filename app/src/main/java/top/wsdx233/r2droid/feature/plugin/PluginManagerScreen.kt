@@ -38,8 +38,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -945,6 +948,7 @@ private fun CreateDeveloperPluginDialog(
     var version by remember { mutableStateOf("1.0.0") }
     var description by remember { mutableStateOf("") }
     var author by remember { mutableStateOf("") }
+    var typeMenuExpanded by remember { mutableStateOf(false) }
     val selectedPermissions = remember {
         mutableStateMapOf<String, Boolean>().apply {
             PluginRuntime.Permission.entries.forEach { put(it.key, false) }
@@ -955,6 +959,7 @@ private fun CreateDeveloperPluginDialog(
         DeveloperPluginType.WEBVIEW -> stringResource(R.string.plugin_developer_type_webview)
         DeveloperPluginType.SCHEMA -> stringResource(R.string.plugin_developer_type_schema)
         DeveloperPluginType.TERMINAL -> stringResource(R.string.plugin_developer_type_terminal)
+        DeveloperPluginType.NATIVE -> stringResource(R.string.plugin_developer_type_native)
     }
 
     val canConfirm = id.isNotBlank() && name.isNotBlank() && version.isNotBlank()
@@ -971,15 +976,32 @@ private fun CreateDeveloperPluginDialog(
                     text = stringResource(R.string.plugin_developer_plugin_type, typeLabel),
                     style = MaterialTheme.typography.bodyMedium
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = { type = DeveloperPluginType.WEBVIEW }) {
-                        Text(stringResource(R.string.plugin_developer_type_webview))
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { typeMenuExpanded = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(typeLabel)
                     }
-                    TextButton(onClick = { type = DeveloperPluginType.SCHEMA }) {
-                        Text(stringResource(R.string.plugin_developer_type_schema))
-                    }
-                    TextButton(onClick = { type = DeveloperPluginType.TERMINAL }) {
-                        Text(stringResource(R.string.plugin_developer_type_terminal))
+                    DropdownMenu(
+                        expanded = typeMenuExpanded,
+                        onDismissRequest = { typeMenuExpanded = false }
+                    ) {
+                        DeveloperPluginType.entries.forEach { candidate ->
+                            val candidateLabel = when (candidate) {
+                                DeveloperPluginType.WEBVIEW -> stringResource(R.string.plugin_developer_type_webview)
+                                DeveloperPluginType.SCHEMA -> stringResource(R.string.plugin_developer_type_schema)
+                                DeveloperPluginType.TERMINAL -> stringResource(R.string.plugin_developer_type_terminal)
+                                DeveloperPluginType.NATIVE -> stringResource(R.string.plugin_developer_type_native)
+                            }
+                            DropdownMenuItem(
+                                text = { Text(candidateLabel) },
+                                onClick = {
+                                    type = candidate
+                                    typeMenuExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
 

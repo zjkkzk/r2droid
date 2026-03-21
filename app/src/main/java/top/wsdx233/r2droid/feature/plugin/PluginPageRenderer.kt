@@ -58,6 +58,7 @@ fun PluginPageRenderer(
 ) {
     when (page.type.lowercase()) {
         "schema" -> SchemaPluginPage(pluginId = pluginId, path = page.path, modifier = modifier)
+        "native" -> SchemaPluginPage(pluginId = pluginId, path = page.path, modifier = modifier)
         "terminal" -> TerminalCommandPluginPage(pluginId = pluginId, modifier = modifier)
         else -> WebViewPluginPage(pluginId = pluginId, path = page.path, modifier = modifier)
     }
@@ -279,17 +280,7 @@ private fun SchemaPluginPage(
         horizontalAlignment = parseHorizontalAlignment(schema.align)
     ) {
         val schemaScriptCode = remember(schemaFile.absolutePath, schema.script) {
-            val scriptRef = schema.script?.trim().orEmpty()
-            if (scriptRef.isBlank()) {
-                null
-            } else {
-                val scriptFile = PluginManager.resolvePluginFile(pluginId, scriptRef)
-                if (scriptFile != null && scriptFile.exists()) {
-                    runCatching { scriptFile.readText() }.getOrNull()
-                } else {
-                    scriptRef
-                }
-            }
+            PluginManager.resolvePluginTextReference(pluginId, schema.script)
         }
 
         schema.widgets.forEach { widget ->
@@ -351,6 +342,38 @@ private fun RenderSchemaWidget(
             }
         }
 
+        "outlined_button", "outlinedbutton" -> {
+            val label = widget.text ?: "Run"
+            OutlinedButton(
+                onClick = {
+                    onOutput(runSchemaAction(pluginId, widget, script))
+                },
+                modifier = baseModifier
+            ) {
+                Text(label)
+            }
+        }
+
+        "card" -> {
+            Card(modifier = baseModifier) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(widget.spacing.dp),
+                    horizontalAlignment = parseHorizontalAlignment(widget.align)
+                ) {
+                    widget.children.forEach { child ->
+                        RenderSchemaWidget(pluginId = pluginId, widget = child, script = script, onOutput = onOutput)
+                    }
+                }
+            }
+        }
+
+        "divider" -> {
+            androidx.compose.material3.HorizontalDivider(modifier = baseModifier.fillMaxWidth())
+        }
+
         "row" -> {
             Row(
                 modifier = baseModifier,
@@ -399,7 +422,12 @@ private fun RenderSchemaWidget(
 }
 
 private fun runSchemaAction(pluginId: String, widget: PluginSchemaWidget, script: String?): String {
-    val action = widget.action?.lowercase() ?: return "Unsupported action"
+    val action = widget.action
+        ?.trim()
+        ?.lowercase()
+        ?.takeIf { it.isNotBlank() }
+        ?: widget.function?.takeIf { it.isNotBlank() }?.let { "script.call" }
+        ?: return "Unsupported action"
     return when (action) {
         "r2" -> {
             val cmd = widget.command ?: ""
@@ -407,13 +435,15 @@ private fun runSchemaAction(pluginId: String, widget: PluginSchemaWidget, script
         }
 
         "script" -> {
-            val code = widget.script ?: ""
+            val code = PluginManager.resolvePluginTextReference(pluginId, widget.script) ?: ""
             runBlocking { PluginRuntime.runPluginScript(pluginId, code).getOrElse { "Error: ${it.message}" } }
         }
 
         "script.call" -> {
             val fn = widget.function ?: widget.command ?: ""
-            val scriptCode = widget.script?.takeIf { it.isNotBlank() } ?: script.orEmpty()
+            val scriptCode = PluginManager.resolvePluginTextReference(pluginId, widget.script)
+                ?.takeIf { it.isNotBlank() }
+                ?: script.orEmpty()
             runBlocking { PluginRuntime.runPluginScriptFunction(pluginId, scriptCode, fn).getOrElse { "Error: ${it.message}" } }
         }
 

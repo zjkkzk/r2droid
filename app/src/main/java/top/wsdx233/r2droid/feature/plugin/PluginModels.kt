@@ -34,7 +34,8 @@ data class PluginManifest(
     @SerialName("entry") val entry: PluginEntry? = null,
     @SerialName("ui") val ui: PluginUiOptions = PluginUiOptions(),
     @SerialName("tabs") val tabs: List<PluginScreenTab> = emptyList(),
-    @SerialName("projectTabs") val projectTabs: List<PluginProjectTab> = emptyList()
+    @SerialName("projectTabs") val projectTabs: List<PluginProjectTab> = emptyList(),
+    @SerialName("appBarActions") val appBarActions: List<PluginProjectAction> = emptyList()
 )
 
 @Serializable
@@ -59,7 +60,8 @@ data class PluginUiOptions(
 @Serializable
 data class PluginPage(
     @SerialName("type") val type: String = "webview",
-    @SerialName("path") val path: String
+    @SerialName("path") val path: String,
+    @SerialName("function") val function: String? = null
 )
 
 @Serializable
@@ -77,6 +79,16 @@ data class PluginScreenTab(
     @SerialName("title") val title: String,
     @SerialName("page") val page: PluginPage,
     @SerialName("visibleWhen") val visibleWhen: String = "always"
+)
+
+@Serializable
+data class PluginProjectAction(
+    @SerialName("key") val key: String,
+    @SerialName("title") val title: String = "",
+    @SerialName("icon") val icon: String = "settings",
+    @SerialName("function") val function: String? = null,
+    @SerialName("script") val script: String? = null,
+    @SerialName("visibleTabs") val visibleTabs: List<String> = listOf("*")
 )
 
 @Serializable
@@ -121,6 +133,12 @@ data class PluginScreenTabDescriptor(
     val tab: PluginScreenTab
 )
 
+data class PluginProjectActionDescriptor(
+    val pluginId: String,
+    val pluginName: String,
+    val action: PluginProjectAction
+)
+
 @Serializable
 data class PluginDeveloperConfig(
     @SerialName("enabled") val enabled: Boolean = false,
@@ -130,7 +148,8 @@ data class PluginDeveloperConfig(
 enum class DeveloperPluginType(val key: String) {
     WEBVIEW("webview"),
     SCHEMA("schema"),
-    TERMINAL("terminal");
+    TERMINAL("terminal"),
+    NATIVE("native");
 
     companion object {
         fun fromKey(key: String): DeveloperPluginType {

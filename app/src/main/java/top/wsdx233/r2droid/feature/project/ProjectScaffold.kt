@@ -1,5 +1,6 @@
 package top.wsdx233.r2droid.feature.project
 
+import android.content.Context
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -32,15 +33,23 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.MenuOpen
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatPaint
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
@@ -51,6 +60,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -84,6 +94,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -120,6 +131,8 @@ import top.wsdx233.r2droid.feature.terminal.ui.CommandScreen
 import top.wsdx233.r2droid.feature.plugin.PluginManager
 import top.wsdx233.r2droid.feature.plugin.PluginPage
 import top.wsdx233.r2droid.feature.plugin.PluginPageRenderer
+import top.wsdx233.r2droid.feature.plugin.PluginProjectActionDescriptor
+import top.wsdx233.r2droid.feature.plugin.PluginRuntime
 import top.wsdx233.r2droid.feature.plugin.PluginScreenTabDescriptor
 import top.wsdx233.r2droid.util.R2PipeManager
 
@@ -146,6 +159,7 @@ fun ProjectScaffold(
     onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
     
     // Global invalidation listener
     val globalInvalidation by viewModel.globalDataInvalidated.collectAsState()
@@ -265,6 +279,7 @@ fun ProjectScaffold(
     }
     val baseProjectTabs = listOf(R.string.proj_tab_settings, R.string.proj_tab_cmd, R.string.proj_tab_logs)
     val pluginProjectTabs by PluginManager.projectTabs.collectAsState()
+    val pluginProjectActions by PluginManager.projectActions.collectAsState()
     val projectTabs = buildList {
         addAll(baseProjectTabs.map { stringResource(it) })
         addAll(pluginProjectTabs.map { it.tab.title })
@@ -312,6 +327,77 @@ fun ProjectScaffold(
         if (selectedR2FridaTabIndex >= r2fridaTabTitles.size) {
             selectedR2FridaTabIndex = 0
         }
+    }
+
+    val currentPluginActionTabAliases = remember(
+        selectedCategory,
+        selectedListTabIndex,
+        selectedDetailTabIndex,
+        selectedProjectTabIndex,
+        selectedAiTabIndex,
+        selectedR2FridaTabIndex,
+        listTabTitles,
+        detailTabTitles,
+        projectTabs,
+        aiTabTitles,
+        r2fridaTabTitles,
+        pluginListTabs,
+        pluginDetailTabs,
+        pluginProjectTabs,
+        pluginAiTabs,
+        pluginR2fridaTabs
+    ) {
+        when (selectedCategory) {
+            MainCategory.List -> buildCurrentTabAliases(
+                selectedIndex = selectedListTabIndex,
+                allTitles = listTabTitles,
+                baseKeys = listOf(
+                    "list.overview", "list.search", "list.sections", "list.symbols",
+                    "list.imports", "list.relocations", "list.strings", "list.functions"
+                ),
+                baseSize = baseListTabs.size,
+                pluginKeys = pluginListTabs.map { it.tab.key }
+            )
+
+            MainCategory.Detail -> buildCurrentTabAliases(
+                selectedIndex = selectedDetailTabIndex,
+                allTitles = detailTabTitles,
+                baseKeys = listOf("detail.hex", "detail.disassembly", "detail.decompile", "detail.graph"),
+                baseSize = baseDetailTabs.size,
+                pluginKeys = pluginDetailTabs.map { it.tab.key }
+            )
+
+            MainCategory.Project -> buildCurrentTabAliases(
+                selectedIndex = selectedProjectTabIndex,
+                allTitles = projectTabs,
+                baseKeys = listOf("project.settings", "project.command", "project.logs"),
+                baseSize = baseProjectTabs.size,
+                pluginKeys = pluginProjectTabs.map { it.tab.key }
+            )
+
+            MainCategory.AI -> buildCurrentTabAliases(
+                selectedIndex = selectedAiTabIndex,
+                allTitles = aiTabTitles,
+                baseKeys = listOf("ai.chat", "ai.settings", "ai.prompts"),
+                baseSize = baseAiTabs.size,
+                pluginKeys = pluginAiTabs.map { it.tab.key }
+            )
+
+            MainCategory.R2Frida -> buildCurrentTabAliases(
+                selectedIndex = selectedR2FridaTabIndex,
+                allTitles = r2fridaTabTitles,
+                baseKeys = listOf(
+                    "r2frida.overview", "r2frida.libraries", "r2frida.mappings", "r2frida.scripts",
+                    "r2frida.entries", "r2frida.exports", "r2frida.strings", "r2frida.symbols",
+                    "r2frida.sections", "r2frida.functions", "r2frida.search", "r2frida.monitor"
+                ),
+                baseSize = baseR2fridaTabs.size,
+                pluginKeys = pluginR2fridaTabs.map { it.tab.key }
+            )
+        }
+    }
+    val visibleProjectActions = pluginProjectActions.filter { descriptor ->
+        isPluginProjectActionVisible(descriptor, currentPluginActionTabAliases)
     }
 
     val quickJumpToDetail: ((Long) -> Unit)? = when (SettingsManager.defaultJumpTarget) {
@@ -650,6 +736,23 @@ fun ProjectScaffold(
                                         showStringsMenu = false
                                         viewModel.setStringsUseFullRange(!stringsUseFullRange)
                                     }
+                                )
+                            }
+                        }
+                        visibleProjectActions.forEach { descriptor ->
+                            IconButton(
+                                onClick = {
+                                    sheetScope.launch {
+                                        executePluginProjectAction(
+                                            context = context,
+                                            descriptor = descriptor
+                                        )
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = pluginProjectActionIcon(descriptor.action.icon),
+                                    contentDescription = descriptor.action.title.ifBlank { descriptor.action.key }
                                 )
                             }
                         }
@@ -1331,6 +1434,99 @@ private fun RenderPluginInjectedTab(
             text = "This tab is only available in r2frida session",
             modifier = modifier.padding(16.dp)
         )
+    }
+}
+
+private fun buildCurrentTabAliases(
+    selectedIndex: Int,
+    allTitles: List<String>,
+    baseKeys: List<String>,
+    baseSize: Int,
+    pluginKeys: List<String>
+): Set<String> {
+    val title = allTitles.getOrNull(selectedIndex)?.trim().orEmpty()
+    if (title.isBlank()) return emptySet()
+    val aliases = linkedSetOf(title, title.lowercase())
+    if (selectedIndex < baseSize) {
+        baseKeys.getOrNull(selectedIndex)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let {
+                aliases += it
+                aliases += it.lowercase()
+            }
+    } else {
+        pluginKeys.getOrNull(selectedIndex - baseSize)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let {
+                aliases += it
+                aliases += it.lowercase()
+            }
+    }
+    return aliases
+}
+
+private fun isPluginProjectActionVisible(
+    descriptor: PluginProjectActionDescriptor,
+    currentAliases: Set<String>
+): Boolean {
+    val visibleTabs = descriptor.action.visibleTabs
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .ifEmpty { listOf("*") }
+    return visibleTabs.any { visible ->
+        visible == "*" || currentAliases.any { alias -> alias.equals(visible, ignoreCase = true) }
+    }
+}
+
+private fun pluginProjectActionIcon(icon: String): ImageVector {
+    return when (icon.trim().lowercase()) {
+        "play", "run" -> Icons.Default.PlayArrow
+        "refresh", "reload" -> Icons.Default.Refresh
+        "search" -> Icons.Default.Search
+        "save" -> Icons.Default.Save
+        "settings" -> Icons.Default.Settings
+        "open", "open_in_new", "external" -> Icons.AutoMirrored.Filled.OpenInNew
+        "edit" -> Icons.Default.Edit
+        "delete", "remove" -> Icons.Default.Delete
+        else -> Icons.Default.MoreVert
+    }
+}
+
+private suspend fun executePluginProjectAction(
+    context: Context,
+    descriptor: PluginProjectActionDescriptor
+) {
+    val pluginId = descriptor.pluginId
+    val functionName = descriptor.action.function?.trim().orEmpty()
+    val scriptCode = PluginManager.resolvePluginTextReference(pluginId, descriptor.action.script)
+        ?: PluginManager.findInstalledPlugin(pluginId)
+            ?.manifest
+            ?.entry
+            ?.script
+            ?.let { PluginManager.resolvePluginTextReference(pluginId, it) }
+        ?: ""
+
+    val result = when {
+        functionName.isNotBlank() && scriptCode.isNotBlank() ->
+            PluginRuntime.runPluginScriptFunction(pluginId, scriptCode, functionName)
+
+        scriptCode.isNotBlank() ->
+            PluginRuntime.runPluginScript(pluginId, scriptCode)
+
+        else -> Result.failure(IllegalStateException("plugin action missing script or function"))
+    }
+
+    result.onSuccess { output ->
+        val text = output.trim().takeIf { it.isNotBlank() && it != "(plugin script executed)" } ?: return@onSuccess
+        android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
+    }.onFailure { throwable ->
+        android.widget.Toast.makeText(
+            context,
+            throwable.message ?: "Plugin action failed",
+            android.widget.Toast.LENGTH_SHORT
+        ).show()
     }
 }
 

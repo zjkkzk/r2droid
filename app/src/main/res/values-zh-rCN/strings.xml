@@ -708,6 +708,7 @@
     <string name="plugin_developer_type_webview">WebView</string>
     <string name="plugin_developer_type_schema">Schema</string>
     <string name="plugin_developer_type_terminal">终端</string>
+    <string name="plugin_developer_type_native">原生 JSON</string>
     <string name="plugin_developer_plugin_id">插件 ID</string>
     <string name="plugin_developer_plugin_name">插件名称</string>
     <string name="plugin_developer_plugin_version">版本</string>

@@ -107,7 +107,7 @@ object PluginRuntime {
         runCatching {
             val context = createContext(pluginId)
             val normalized = functionName.trim()
-            require(normalized.matches(Regex("""[A-Za-z_$][\\w$]*(\\.[A-Za-z_$][\\w$]*)*"""))) {
+            require(normalized.matches(Regex("""[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*"""))) {
                 "invalid function name: $functionName"
             }
             val invokeCode = buildString {

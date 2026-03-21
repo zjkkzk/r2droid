@@ -706,6 +706,7 @@
     <string name="plugin_developer_type_webview">WebView</string>
     <string name="plugin_developer_type_schema">Schema</string>
     <string name="plugin_developer_type_terminal">Terminal</string>
+    <string name="plugin_developer_type_native">Native JSON</string>
     <string name="plugin_developer_plugin_id">Plugin ID</string>
     <string name="plugin_developer_plugin_name">Plugin Name</string>
     <string name="plugin_developer_plugin_version">Version</string>

@@ -52,6 +52,9 @@ object PluginManager {
     private val _screenTabs = MutableStateFlow<List<PluginScreenTabDescriptor>>(emptyList())
     val screenTabs = _screenTabs.asStateFlow()
 
+    private val _projectActions = MutableStateFlow<List<PluginProjectActionDescriptor>>(emptyList())
+    val projectActions = _projectActions.asStateFlow()
+
     private val _repositorySources = MutableStateFlow<List<String>>(emptyList())
     val repositorySources = _repositorySources.asStateFlow()
 
@@ -476,6 +479,13 @@ object PluginManager {
                 DeveloperPluginType.TERMINAL -> {
                     PluginEntry(terminal = PluginTerminalEntry(command = "r2 -v", title = request.name))
                 }
+
+                DeveloperPluginType.NATIVE -> {
+                    val uiDir = File(pluginDir, "ui").apply { mkdirs() }
+                    File(uiDir, "native.json").writeText(defaultNativePageJson(request.name))
+                    File(uiDir, "native.js").writeText(defaultNativePageScript())
+                    PluginEntry(page = PluginPage(type = "native", path = "ui/native.json"))
+                }
             }
 
             val manifest = PluginManifest(
@@ -488,7 +498,8 @@ object PluginManager {
                 entry = entry,
                 ui = PluginUiOptions(),
                 tabs = emptyList(),
-                projectTabs = emptyList()
+                projectTabs = emptyList(),
+                appBarActions = emptyList()
             )
             File(pluginDir, "manifest.json").writeText(
                 json.encodeToString(PluginManifest.serializer(), manifest)
@@ -547,6 +558,16 @@ object PluginManager {
         val plugin = findInstalledPlugin(pluginId) ?: return null
         val dataRoot = File(plugin.state.installDir, "data").apply { mkdirs() }
         return resolvePathUnder(dataRoot, relativePath, mustExist = mustExist)
+    }
+
+    fun resolvePluginTextReference(pluginId: String, reference: String?): String? {
+        val normalized = reference?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val file = resolvePluginFile(pluginId, normalized)
+        return if (file != null && file.exists() && file.isFile) {
+            runCatching { file.readText() }.getOrNull()
+        } else {
+            normalized
+        }
     }
 
     fun getPluginPermissions(pluginId: String): Set<String> {
@@ -952,6 +973,18 @@ object PluginManager {
                     )
                 }
             }
+        _projectActions.value = installedPlugins
+            .filter { it.state.enabled }
+            .flatMap { plugin ->
+                val manifest = plugin.manifest ?: return@flatMap emptyList()
+                manifest.appBarActions.map { action ->
+                    PluginProjectActionDescriptor(
+                        pluginId = plugin.state.id,
+                        pluginName = manifest.name,
+                        action = action
+                    )
+                }
+            }
     }
 
     private fun readInstalledStates(): List<InstalledPluginState> {
@@ -1312,6 +1345,61 @@ object PluginManager {
                   "command": "?V"
                 }
               ]
+            }
+        """.trimIndent()
+    }
+
+    private fun defaultNativePageJson(name: String): String {
+        return """
+            {
+              "script": "ui/native.js",
+              "scroll": "vertical",
+              "spacing": 12,
+              "widgets": [
+                {
+                  "type": "card",
+                  "children": [
+                    {
+                      "type": "column",
+                      "spacing": 10,
+                      "children": [
+                        {
+                          "type": "text",
+                          "text": "$name"
+                        },
+                        {
+                          "type": "text",
+                          "text": "This is a native plugin page rendered from JSON layout."
+                        },
+                        {
+                          "type": "button",
+                          "text": "Open Android Settings",
+                          "function": "openSettings"
+                        },
+                        {
+                          "type": "button",
+                          "text": "Run ?V",
+                          "action": "r2",
+                          "command": "?V"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+    }
+
+    private fun defaultNativePageScript(): String {
+        return """
+            function openSettings() {
+              const intent = android.getLaunchIntentForPackage("com.android.settings");
+              if (!intent) {
+                return "Settings app not found";
+              }
+              android.startActivity(intent);
+              return "Started com.android.settings";
             }
         """.trimIndent()
     }
