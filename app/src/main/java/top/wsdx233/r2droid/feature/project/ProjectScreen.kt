@@ -625,23 +625,21 @@ private fun CryptoDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.tool_crypto)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 OutlinedTextField(value = input, onValueChange = { input = it }, label = { Text("Input") })
-            }
-        },
-        confirmButton = {
-            Column {
-                Row {
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     TextButton(onClick = { onShowResult(Base64.getEncoder().encodeToString(input.toByteArray())) }) { Text("B64") }
                     TextButton(onClick = { onShowResult(runCatching { String(Base64.getDecoder().decode(input)) }.getOrDefault("error")) }) { Text("B64-DEC") }
-                }
-                Row {
                     TextButton(onClick = { onShowResult(URLEncoder.encode(input, "UTF-8")) }) { Text("URL") }
                     TextButton(onClick = { onShowResult(URLDecoder.decode(input, "UTF-8")) }) { Text("URL-DEC") }
                     TextButton(onClick = { onShowResult("MD5 ${md("MD5", input)}\nSHA256 ${md("SHA-256", input)}") }) { Text("HASH") }
                 }
             }
         },
+        confirmButton = {},
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.home_delete_cancel)) } }
     )
 }
