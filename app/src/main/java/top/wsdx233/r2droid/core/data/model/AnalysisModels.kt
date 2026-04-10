@@ -261,7 +261,7 @@ data class FunctionInfo(
         fun fromJson(json: JSONObject): FunctionInfo {
             return FunctionInfo(
                 name = json.optString("name", ""),
-                addr = json.optLong("addr", 0),
+                addr = json.optLong("addr", json.optLong("offset", 0)),
                 size = json.optLong("size", 0),
                 nbbs = json.optInt("nbbs", 0),
                 signature = json.optString("signature", "")
