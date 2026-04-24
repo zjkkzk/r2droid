@@ -729,6 +729,7 @@
     <string name="plugin_permission_network">Network access</string>
     <string name="plugin_permission_process">Launch subprocesses</string>
     <string name="plugin_permission_r2">Execute R2 commands</string>
+    <string name="plugin_permission_proot">Use proot environments</string>
     <string name="plugin_permission_terminal">Open terminal entry</string>
     <string name="plugin_permission_frida">Execute Frida scripts</string>
     <string name="plugin_permission_settings_read">Read app settings</string>

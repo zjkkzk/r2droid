@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blutter APK Analyzer</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #101418;
+      --card: #182028;
+      --text: #eef3f8;
+      --muted: #9fb0c0;
+      --accent: #7cc7ff;
+      --danger: #ff8a80;
+      --ok: #9be7a2;
+      --border: #2c3a46;
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; }
+    p { color: var(--muted); line-height: 1.45; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      margin: 12px 0;
+    }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #243445;
+      color: var(--text);
+      font-weight: 600;
+    }
+    button.primary { background: #0b5f8f; border-color: #0d75b1; }
+    button:disabled { opacity: .55; }
+    .path {
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 10px;
+      background: #0c1117;
+      color: var(--muted);
+      word-break: break-all;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .status { color: var(--accent); font-weight: 700; }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--danger); }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #05080c;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 220px;
+      max-height: 55vh;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .small { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>Blutter APK Analyzer</h1>
+  <p>Process Flutter APKs with <code>blutter</code> inside R2Droid's dedicated plugin Ubuntu proot environment.</p>
+
+  <div class="card">
+    <div class="row">
+      <button onclick="pickApk()">Choose APK</button>
+      <button onclick="pickOutputDir()">Choose Output Dir</button>
+    </div>
+    <div class="path" id="apkPath">APK: not selected</div>
+    <div class="path" id="outPath">Output: default plugin data directory</div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button onclick="setupEnvironment()">Setup / Repair Environment</button>
+      <button class="primary" onclick="runBlutter()">Run Blutter</button>
+      <button onclick="stopRun()">Stop</button>
+      <button onclick="clearLog()">Clear Log</button>
+    </div>
+    <p class="small">
+      First run can take a long time: Ubuntu rootfs, apt packages, blutter source and Python dependencies may need to be downloaded.
+    </p>
+    <div id="status" class="status">Idle</div>
+  </div>
+
+  <pre id="log"></pre>
+
+  <script>
+    const host = window.R2PluginHost;
+    let apkPath = '';
+    let outputDir = '';
+    let running = false;
+
+    function setStatus(text, cls = '') {
+      const el = document.getElementById('status');
+      el.className = 'status ' + cls;
+      el.textContent = text;
+    }
+
+    function log(text) {
+      const el = document.getElementById('log');
+      el.textContent += text + '\n';
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function clearLog() {
+      document.getElementById('log').textContent = '';
+    }
+
+    function shQuote(value) {
+      return "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+    }
+
+    function baseName(path) {
+      return String(path || 'apk').split('/').pop().replace(/\.apk$/i, '').replace(/[^A-Za-z0-9_.-]/g, '_') || 'apk';
+    }
+
+    function defaultOutputDir() {
+      return host.dataDir() + '/blutter-output/' + baseName(apkPath || 'apk') + '-' + Date.now();
+    }
+
+    function pickApk() {
+      try {
+        const picked = host.pickFile('blutter-apk-' + Date.now());
+        if (picked && !picked.startsWith('Error:')) {
+          apkPath = picked;
+          document.getElementById('apkPath').textContent = 'APK: ' + apkPath;
+          if (!outputDir) {
+            document.getElementById('outPath').textContent = 'Output: ' + defaultOutputDir();
+          }
+        } else if (picked) {
+          log(picked);
+          setStatus('Failed to pick APK', 'err');
+        }
+      } catch (e) {
+        log('pickApk error: ' + e);
+        setStatus('Failed to pick APK', 'err');
+      }
+    }
+
+    function pickOutputDir() {
+      try {
+        const picked = host.pickDirectory('blutter-out-' + Date.now());
+        if (picked && !picked.startsWith('Error:')) {
+          outputDir = picked + '/blutter-' + baseName(apkPath || 'apk') + '-' + Date.now();
+          document.getElementById('outPath').textContent = 'Output: ' + outputDir;
+        } else if (picked) {
+          log(picked);
+          setStatus('Failed to pick output directory', 'err');
+        }
+      } catch (e) {
+        log('pickOutputDir error: ' + e);
+        setStatus('Failed to pick output directory', 'err');
+      }
+    }
+
+    function setupEnvironment() {
+      setStatus('Preparing plugin proot in native dialog...', '');
+      log('Starting native setup/repair dialog. This runs outside the WebView thread.');
+      try {
+        const result = host.prepareProot(true);
+        log(result);
+      } catch (e) {
+        log('setup error: ' + e);
+        setStatus('Failed to start setup', 'err');
+      }
+    }
+
+    function runBlutter() {
+      if (running) return;
+      if (!apkPath) {
+        setStatus('Please choose an APK first', 'err');
+        return;
+      }
+      try {
+        if (host.isProotPrepared() !== 'true') {
+          log('Plugin proot is not fully prepared. Starting native setup dialog first. Run Blutter again after setup completes.');
+          host.prepareProot(false);
+          setStatus('Environment setup required', '');
+          return;
+        }
+      } catch (e) {
+        log('proot status check failed: ' + e);
+      }
+      const out = outputDir || defaultOutputDir();
+      document.getElementById('outPath').textContent = 'Output: ' + out;
+      const script = host.pluginDir() + '/scripts/run_blutter.sh';
+      const cmd = 'bash ' + shQuote(script) + ' ' + shQuote(apkPath) + ' ' + shQuote(out);
+      log('$ ' + cmd);
+      const started = host.prootProcStart('blutter', 'plugin', cmd);
+      if (started !== 'ok') {
+        log(started);
+        setStatus('Failed to start blutter', 'err');
+        return;
+      }
+      running = true;
+      setStatus('Running blutter...', '');
+      pollOutput();
+    }
+
+    function pollOutput() {
+      if (!running) return;
+      const chunk = host.procRead('blutter', 500, 200);
+      if (chunk) {
+        log(chunk);
+        if (chunk.indexOf('[[exit:') >= 0) {
+          running = false;
+          if (chunk.indexOf('[[exit:0]]') >= 0) {
+            setStatus('Finished successfully', 'ok');
+          } else {
+            setStatus('Finished with error', 'err');
+          }
+          return;
+        }
+      }
+      setTimeout(pollOutput, 700);
+    }
+
+    function stopRun() {
+      const result = host.procStop('blutter');
+      log(result);
+      running = false;
+      setStatus('Stopped', 'err');
+    }
+
+    window.addEventListener('r2pluginready', () => {
+      log('Plugin ready. Data dir: ' + host.dataDir());
+      try {
+        log('Plugin proot status: ' + host.prootIsReady('plugin'));
+      } catch (e) {
+        log('Plugin proot status check failed: ' + e);
+      }
+    });
+  </script>
+</body>
+</html>

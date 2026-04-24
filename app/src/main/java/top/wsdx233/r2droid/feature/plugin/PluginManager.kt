@@ -16,6 +16,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
+import top.wsdx233.r2droid.core.data.prefs.SettingsManager
+import top.wsdx233.r2droid.util.PluginProotInstaller
+import top.wsdx233.r2droid.util.ProotInstallState
+import top.wsdx233.r2droid.util.ProotInstaller
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -196,6 +200,7 @@ object PluginManager {
             writeInstalledStates(states)
             updateInstallProgress(entry.id, 0.95f)
             reloadInstalledFromDisk()
+            runProotSetupIfPresent(entry.id, reason = "install")
             runInstallScriptIfPresent(entry.id, reason = "install")
             refreshCatalog()
             appendLog("[install] ${entry.id}@${entry.version} success")
@@ -262,6 +267,7 @@ object PluginManager {
             writeInstalledStates(updated)
             reloadInstalledFromDisk()
             if (enabled) {
+                runProotSetupIfPresent(pluginId, reason = "enable")
                 runInstallScriptIfPresent(pluginId, reason = "enable")
             }
             refreshCatalog()
@@ -392,6 +398,7 @@ object PluginManager {
             }
             writeInstalledStates(states)
             reloadInstalledFromDisk()
+            runProotSetupIfPresent(normalizedId, reason = "install")
             runInstallScriptIfPresent(normalizedId, reason = "install")
             refreshCatalog()
             appendLog("[install] $normalizedId@${manifest.version} from zip success")
@@ -905,6 +912,178 @@ object PluginManager {
                 runInstallScriptIfPresent(plugin.state.id, reason = "startup")
             }
     }
+
+    fun isProotPreparedForPlugin(pluginId: String): Boolean {
+        val plugin = findInstalledPlugin(pluginId) ?: return false
+        val config = plugin.manifest?.proot ?: return true
+        if (!config.enabled) return true
+        return isPluginProotSetupSatisfied(plugin, config)
+    }
+
+    suspend fun prepareProotForPlugin(pluginId: String, force: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
+        ensureInitialized()
+        runCatching {
+            val plugin = findInstalledPlugin(pluginId) ?: error("plugin not installed: $pluginId")
+            val manifest = plugin.manifest ?: return@runCatching
+            val config = manifest.proot ?: return@runCatching
+            if (!config.enabled) return@runCatching
+            if (!force && isPluginProotSetupSatisfied(plugin, config)) {
+                PluginProotInstaller.markDone("${manifest.name} proot environment is ready.")
+                return@runCatching
+            }
+            PluginProotInstaller.resetState()
+            runProotSetupIfPresent(pluginId, reason = if (force) "repair" else "prepare")
+        }.onFailure { PluginProotInstaller.markError(it) }
+    }
+
+    private fun isPluginProotSetupSatisfied(plugin: InstalledPlugin, config: PluginProotConfig): Boolean {
+        val environment = config.environment.trim().lowercase().ifBlank { "plugin" }
+        val runtimeReady = when (environment) {
+            "main", "r2", "radare2" -> ProotInstaller.isEnvironmentReady(appContext)
+            else -> PluginProotInstaller.isReady(appContext)
+        }
+        if (!runtimeReady) return false
+        return prootSetupMarker(plugin).exists()
+    }
+
+    private fun prootSetupMarker(plugin: InstalledPlugin): File {
+        return File(plugin.state.installDir, "data/.proot-setup-${plugin.state.version}.complete")
+    }
+
+    private suspend fun runProotSetupIfPresent(pluginId: String, reason: String) {
+        val plugin = findInstalledPlugin(pluginId) ?: return
+        val manifest = plugin.manifest ?: return
+        val config = manifest.proot ?: return
+        if (!config.enabled) return
+
+        val environment = config.environment.trim().lowercase().ifBlank { "plugin" }
+        appendLog("[proot][$reason] preparing $pluginId in $environment environment")
+        PluginProotInstaller.updateState(ProotInstallState.Status.PREPARING, 0.01f, "Preparing ${manifest.name} proot environment...")
+        val logger: (String) -> Unit = { line ->
+            appendLog("[proot][$pluginId] $line")
+            PluginProotInstaller.appendLog(line)
+        }
+
+        when (environment) {
+            "main", "r2", "radare2" -> {
+                if (!SettingsManager.useProotMode) {
+                    throw IllegalStateException("plugin $pluginId requests main proot, but proot mode is disabled")
+                }
+                if (!ProotInstaller.isEnvironmentReady(appContext)) {
+                    ProotInstaller.installManual(appContext, rootfsAlias = config.rootfsAlias.ifBlank { "ubuntu" }).getOrThrow()
+                }
+                if (config.aptPackages.isNotEmpty()) {
+                    PluginProotInstaller.updateState(ProotInstallState.Status.INSTALLING_PACKAGES, 0.82f, "Installing ${manifest.name} apt packages...")
+                    ProotInstaller.runProotCommand(appContext, buildAptInstallScript(config.aptPackages), logger)
+                }
+                config.python?.let { python ->
+                    PluginProotInstaller.updateState(ProotInstallState.Status.INSTALLING_PACKAGES, 0.9f, "Creating Python environment for ${manifest.name}...")
+                    val requirementsPath = python.requirements
+                        ?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { resolvePluginPath(pluginId, it, mustExist = false)?.absolutePath ?: it }
+                    ProotInstaller.runProotCommand(appContext, buildPythonVenvScript(python, requirementsPath), logger)
+                }
+                config.r2pmPackages.forEach { packageName ->
+                    PluginProotInstaller.updateState(ProotInstallState.Status.INSTALLING_PLUGINS, 0.94f, "Installing r2pm package $packageName...")
+                    ProotInstaller.runProotCommand(appContext, buildR2pmInstallScript(packageName), logger)
+                }
+                config.setupCommands.filter { it.isNotBlank() }.forEachIndexed { index, command ->
+                    PluginProotInstaller.updateState(ProotInstallState.Status.CONFIGURING, 0.96f, "Running setup command ${index + 1}/${config.setupCommands.size}...")
+                    ProotInstaller.runProotCommand(appContext, command, logger)
+                }
+            }
+            else -> {
+                PluginProotInstaller.ensureReady(
+                    appContext,
+                    rootfsAlias = config.rootfsAlias.ifBlank { "ubuntu" },
+                    logger = logger
+                )
+                if (config.aptPackages.isNotEmpty()) {
+                    PluginProotInstaller.updateState(ProotInstallState.Status.INSTALLING_PACKAGES, 0.82f, "Installing ${manifest.name} apt packages...")
+                    PluginProotInstaller.installAptPackages(appContext, config.aptPackages, logger)
+                }
+                config.python?.let { python ->
+                    PluginProotInstaller.updateState(ProotInstallState.Status.INSTALLING_PACKAGES, 0.9f, "Creating Python environment for ${manifest.name}...")
+                    PluginProotInstaller.createPythonVenv(
+                        context = appContext,
+                        name = python.name.ifBlank { pluginId },
+                        packages = python.packages,
+                        requirementsPath = python.requirements
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { resolvePluginPath(pluginId, it, mustExist = false)?.absolutePath ?: it },
+                        logger = logger
+                    )
+                }
+                config.r2pmPackages.forEach { packageName ->
+                    PluginProotInstaller.updateState(ProotInstallState.Status.INSTALLING_PLUGINS, 0.94f, "Installing r2pm package $packageName...")
+                    PluginProotInstaller.runCommand(appContext, buildR2pmInstallScript(packageName), logger = logger)
+                }
+                config.setupCommands.filter { it.isNotBlank() }.forEachIndexed { index, command ->
+                    PluginProotInstaller.updateState(ProotInstallState.Status.CONFIGURING, 0.96f, "Running setup command ${index + 1}/${config.setupCommands.size}...")
+                    PluginProotInstaller.runCommand(appContext, command, logger = logger)
+                }
+            }
+        }
+        prootSetupMarker(plugin).apply {
+            parentFile?.mkdirs()
+            writeText("version=${plugin.state.version}\ncompletedAt=${System.currentTimeMillis()}\n")
+        }
+        PluginProotInstaller.markDone("${manifest.name} proot environment is ready.")
+        appendLog("[proot][$reason] $pluginId setup completed")
+    }
+
+    private fun buildAptInstallScript(packages: List<String>): String {
+        val joined = packages.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+            .joinToString(" ") { shellEscape(it) }
+        if (joined.isBlank()) return "true"
+        return """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends $joined
+        """.trimIndent()
+    }
+
+    private fun buildPythonVenvScript(python: PluginPythonEnv, requirementsPath: String? = python.requirements): String {
+        val name = python.name.trim().ifBlank { "default" }.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        val packages = python.packages.map { it.trim() }.filter { it.isNotBlank() }
+            .joinToString(" ") { shellEscape(it) }
+        val req = requirementsPath?.trim()?.takeIf { it.isNotBlank() }?.let { " -r ${shellEscape(it)}" }.orEmpty()
+        return """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates
+            mkdir -p /opt/r2droid-plugin-venvs
+            python3 -m venv /opt/r2droid-plugin-venvs/$name
+            /opt/r2droid-plugin-venvs/$name/bin/python -m pip install --upgrade pip setuptools wheel
+            if [ -n ${shellEscape(packages + req)} ]; then
+                /opt/r2droid-plugin-venvs/$name/bin/pip install $packages$req
+            fi
+        """.trimIndent()
+    }
+
+    private fun buildR2pmInstallScript(packageName: String): String {
+        val safePackage = packageName.trim()
+        require(safePackage.matches(Regex("[A-Za-z0-9_.:+@/-]+"))) { "invalid r2pm package: $packageName" }
+        return """
+            set -e
+            export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+            export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/usr/lib/aarch64-linux-gnu:${'$'}{LD_LIBRARY_PATH:-}
+            export LIBRARY_PATH=/usr/local/lib:/usr/lib:/usr/lib/aarch64-linux-gnu:${'$'}{LIBRARY_PATH:-}
+            export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:${'$'}{PKG_CONFIG_PATH:-}
+            R2PM_BIN="$(command -v r2pm || true)"
+            [ -n "${'$'}R2PM_BIN" ] || R2PM_BIN=/usr/local/bin/r2pm
+            [ -x "${'$'}R2PM_BIN" ] || { echo "r2pm not found"; exit 127; }
+            "${'$'}R2PM_BIN" -U
+            hash -r
+            "${'$'}R2PM_BIN" -ci $safePackage
+        """.trimIndent()
+    }
+
+    private fun shellEscape(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
 
     private suspend fun runInstallScriptIfPresent(pluginId: String, reason: String) {
         val plugin = findInstalledPlugin(pluginId) ?: return

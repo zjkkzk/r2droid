@@ -680,6 +680,7 @@ private fun pluginPermissionLabel(permission: String): Int? {
         PluginRuntime.Permission.NETWORK.key -> R.string.plugin_permission_network
         PluginRuntime.Permission.PROCESS.key -> R.string.plugin_permission_process
         PluginRuntime.Permission.R2.key -> R.string.plugin_permission_r2
+        PluginRuntime.Permission.PROOT.key -> R.string.plugin_permission_proot
         PluginRuntime.Permission.TERMINAL.key -> R.string.plugin_permission_terminal
         PluginRuntime.Permission.FRIDA.key -> R.string.plugin_permission_frida
         PluginRuntime.Permission.SETTINGS_READ.key -> R.string.plugin_permission_settings_read

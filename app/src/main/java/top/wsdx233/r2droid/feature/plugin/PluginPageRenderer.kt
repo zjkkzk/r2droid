@@ -30,22 +30,28 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import top.wsdx233.r2droid.activity.TerminalActivity
+import top.wsdx233.r2droid.core.ui.dialogs.ProotInstallDialog
 import top.wsdx233.r2droid.util.DocumentsUiOpenDocumentTreeContract
+import top.wsdx233.r2droid.util.PluginProotInstaller
 import top.wsdx233.r2droid.util.R2PipeManager
 import top.wsdx233.r2droid.util.UriUtils
 import java.io.File
@@ -158,6 +164,8 @@ private fun WebViewPluginPage(
         }
     }
 
+    val scope = rememberCoroutineScope()
+    var showPluginProotDialog by remember(pluginId) { mutableStateOf(false) }
     val bridge = remember(pluginId) {
         PluginWebBridge(
             pluginId = pluginId,
@@ -168,43 +176,71 @@ private fun WebViewPluginPage(
             onPickDirectoryRequest = { requestId ->
                 pendingDirRequestId = requestId
                 dirPickerLauncher.launch(null)
+            },
+            onPrepareProotRequest = { force ->
+                showPluginProotDialog = true
+                scope.launch { PluginManager.prepareProotForPlugin(pluginId, force = force) }
             }
         )
     }
     val includeCurrentActivity = remember(pluginId) {
         PluginManager.getPluginPermissions(pluginId).contains(PluginRuntime.Permission.ANDROID_CLASS.key)
     }
+    val plugin = remember(pluginId) { PluginManager.findInstalledPlugin(pluginId) }
+    val prootConfig = plugin?.manifest?.proot
+    val pluginProotState by PluginProotInstaller.state.collectAsState()
 
-    AndroidView(
-        modifier = modifier.fillMaxSize(),
-        factory = { ctx ->
-            WebView(ctx).apply {
-                settings.javaScriptEnabled = true
-                settings.allowFileAccess = true
-                settings.allowContentAccess = false
-                webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        view?.evaluateJavascript(
-                            PluginRuntime.androidBridgeJavascript(
-                                hostObjectName = "R2PluginHost",
-                                includeCurrentActivity = includeCurrentActivity
-                            ),
-                            null
-                        )
-                    }
-                }
-                webChromeClient = WebChromeClient()
-                addJavascriptInterface(bridge, "R2PluginHost")
-                loadUrl(pageFile.toURI().toString())
-            }
-        },
-        update = { webView ->
-            if (webView.url.isNullOrBlank()) {
-                webView.loadUrl(pageFile.toURI().toString())
-            }
+    LaunchedEffect(pluginId, prootConfig) {
+        val config = prootConfig ?: return@LaunchedEffect
+        val environment = config.environment.trim().lowercase().ifBlank { "plugin" }
+        if (config.enabled && environment !in setOf("main", "r2", "radare2") && !PluginManager.isProotPreparedForPlugin(pluginId)) {
+            showPluginProotDialog = true
+            PluginManager.prepareProotForPlugin(pluginId, force = false)
         }
-    )
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    settings.javaScriptEnabled = true
+                    settings.allowFileAccess = true
+                    settings.allowContentAccess = false
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            view?.evaluateJavascript(
+                                PluginRuntime.androidBridgeJavascript(
+                                    hostObjectName = "R2PluginHost",
+                                    includeCurrentActivity = includeCurrentActivity
+                                ),
+                                null
+                            )
+                        }
+                    }
+                    webChromeClient = WebChromeClient()
+                    addJavascriptInterface(bridge, "R2PluginHost")
+                    loadUrl(pageFile.toURI().toString())
+                }
+            },
+            update = { webView ->
+                if (webView.url.isNullOrBlank()) {
+                    webView.loadUrl(pageFile.toURI().toString())
+                }
+            }
+        )
+
+        if (showPluginProotDialog) {
+            ProotInstallDialog(
+                state = pluginProotState,
+                onClose = {
+                    showPluginProotDialog = false
+                    PluginProotInstaller.resetState()
+                }
+            )
+        }
+    }
 }
 
 private fun resolveUriToAbsolutePath(context: Context, uri: Uri): String? {
@@ -513,6 +549,40 @@ private fun runSchemaAction(pluginId: String, widget: PluginSchemaWidget, script
             ).map { it.toString() }.getOrElse { "Error: ${it.message}" }
         }
 
+        "proot.run" -> {
+            PluginRuntime.prootRun(
+                pluginId = pluginId,
+                environment = widget.environment ?: "plugin",
+                script = widget.command ?: widget.body.orEmpty()
+            ).getOrElse { "Error: ${it.message}" }
+        }
+
+        "proot.ensure" -> {
+            PluginRuntime.prootEnsure(
+                pluginId = pluginId,
+                environment = widget.environment ?: "plugin",
+                rootfsAlias = widget.rootfsAlias ?: "ubuntu"
+            ).getOrElse { "Error: ${it.message}" }
+        }
+
+        "proot.proc.start" -> {
+            PluginRuntime.prootProcessStart(
+                pluginId = pluginId,
+                sessionId = widget.sessionId ?: "default",
+                environment = widget.environment ?: "plugin",
+                commandLine = widget.command ?: ""
+            ).getOrElse { "Error: ${it.message}" }
+        }
+
+        "proot.r2" -> {
+            PluginRuntime.prootR2(
+                pluginId = pluginId,
+                environment = widget.environment ?: "main",
+                r2Command = widget.command ?: "",
+                filePath = widget.path.orEmpty()
+            ).getOrElse { "Error: ${it.message}" }
+        }
+
         "plugin.dir" -> PluginRuntime.getPluginDir(pluginId).getOrElse { "Error: ${it.message}" }
         "data.dir" -> PluginRuntime.getPluginDataDir(pluginId).getOrElse { "Error: ${it.message}" }
         else -> "Unsupported action: $action"
@@ -585,7 +655,8 @@ private fun parseContentAlignment(value: String?): Alignment {
 private class PluginWebBridge(
     private val pluginId: String,
     private val onPickFileRequest: (String) -> Unit,
-    private val onPickDirectoryRequest: (String) -> Unit
+    private val onPickDirectoryRequest: (String) -> Unit,
+    private val onPrepareProotRequest: (Boolean) -> Unit
 ) {
     @JavascriptInterface
     fun r2(command: String): String {
@@ -675,6 +746,76 @@ private class PluginWebBridge(
     fun procAlive(sessionId: String): String {
         return PluginRuntime.processAlive(pluginId, sessionId)
             .map { it.toString() }
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prepareProot(force: Boolean): String {
+        return runBlocking {
+            withContext(Dispatchers.Main) {
+                onPrepareProotRequest(force)
+            }
+            "started"
+        }
+    }
+
+    @JavascriptInterface
+    fun isProotPrepared(): String {
+        return PluginManager.isProotPreparedForPlugin(pluginId).toString()
+    }
+
+    @JavascriptInterface
+    fun prootIsReady(environment: String): String {
+        return PluginRuntime.prootIsReady(pluginId, environment)
+            .map { it.toString() }
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootEnsure(environment: String, rootfsAlias: String): String {
+        return PluginRuntime.prootEnsure(pluginId, environment, rootfsAlias)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootRun(environment: String, script: String): String {
+        return PluginRuntime.prootRun(pluginId, environment, script)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootApt(environment: String, packagesJson: String): String {
+        return PluginRuntime.prootInstallApt(pluginId, environment, packagesJson)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootVenv(environment: String, name: String, packagesJson: String, requirementsPath: String): String {
+        return PluginRuntime.prootCreatePythonVenv(pluginId, environment, name, packagesJson, requirementsPath)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootR2pmInstall(environment: String, packageName: String): String {
+        return PluginRuntime.prootR2pmInstall(pluginId, environment, packageName)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootR2(environment: String, command: String, filePath: String): String {
+        return PluginRuntime.prootR2(pluginId, environment, command, filePath)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootPathInfo(environment: String): String {
+        return PluginRuntime.prootPathInfo(pluginId, environment)
+            .getOrElse { "Error: ${it.message}" }
+    }
+
+    @JavascriptInterface
+    fun prootProcStart(sessionId: String, environment: String, commandLine: String): String {
+        return PluginRuntime.prootProcessStart(pluginId, sessionId, environment, commandLine)
             .getOrElse { "Error: ${it.message}" }
     }
 
@@ -807,5 +948,7 @@ data class PluginSchemaWidget(
     @SerialName("sessionId") val sessionId: String? = null,
     @SerialName("timeoutMs") val timeoutMs: Long = 30L,
     @SerialName("maxLines") val maxLines: Int = 200,
-    @SerialName("function") val function: String? = null
+    @SerialName("function") val function: String? = null,
+    @SerialName("environment") val environment: String? = null,
+    @SerialName("rootfsAlias") val rootfsAlias: String? = null
 )

@@ -731,6 +731,7 @@
     <string name="plugin_permission_network">网络访问</string>
     <string name="plugin_permission_process">启动子进程</string>
     <string name="plugin_permission_r2">执行 R2 指令</string>
+    <string name="plugin_permission_proot">使用 proot 环境</string>
     <string name="plugin_permission_terminal">打开终端入口</string>
     <string name="plugin_permission_frida">执行 Frida 脚本</string>
     <string name="plugin_permission_settings_read">读取应用设置</string>

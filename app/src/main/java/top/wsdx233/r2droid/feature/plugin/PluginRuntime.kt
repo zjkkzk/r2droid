@@ -16,7 +16,10 @@ import kotlinx.serialization.json.jsonObject
 import top.wsdx233.r2droid.core.data.model.SavedProject
 import top.wsdx233.r2droid.core.data.prefs.SettingsManager
 import top.wsdx233.r2droid.feature.project.data.SavedProjectRepository
+import top.wsdx233.r2droid.util.PluginProotInstaller
+import top.wsdx233.r2droid.util.ProotInstaller
 import top.wsdx233.r2droid.util.R2PipeManager
+import top.wsdx233.r2droid.util.R2Runtime
 import java.io.File
 import java.lang.ref.WeakReference
 import java.net.HttpURLConnection
@@ -35,6 +38,7 @@ object PluginRuntime {
         NETWORK("network"),
         PROCESS("process"),
         R2("r2"),
+        PROOT("proot"),
         TERMINAL("terminal"),
         FRIDA("frida"),
         SETTINGS_READ("settings.read"),
@@ -187,6 +191,125 @@ object PluginRuntime {
         val context = createContext(pluginId)
         requirePermission(context, Permission.PROCESS)
         isProcessAlive(context, sessionId)
+    }
+
+    fun prootIsReady(pluginId: String, environment: String = "plugin"): Result<Boolean> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        val appCtx = getAppContext()
+        when (normalizeProotEnvironment(environment)) {
+            ProotEnvironment.MAIN -> ProotInstaller.isEnvironmentReady(appCtx)
+            ProotEnvironment.PLUGIN -> PluginProotInstaller.isReady(appCtx)
+        }
+    }
+
+    fun prootEnsure(pluginId: String, environment: String = "plugin", rootfsAlias: String = "ubuntu"): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        val appCtx = getAppContext()
+        when (normalizeProotEnvironment(environment)) {
+            ProotEnvironment.MAIN -> {
+                if (!ProotInstaller.isEnvironmentReady(appCtx)) {
+                    runBlocking {
+                        ProotInstaller.installManual(appCtx, rootfsAlias = rootfsAlias.ifBlank { "ubuntu" }).getOrThrow()
+                    }
+                }
+                "ok"
+            }
+            ProotEnvironment.PLUGIN -> {
+                PluginProotInstaller.ensureReady(appCtx, rootfsAlias = rootfsAlias.ifBlank { "ubuntu" }) { line ->
+                    PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+                }
+                "ok"
+            }
+        }
+    }
+
+    fun prootRun(pluginId: String, environment: String = "plugin", script: String): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        runProotCommandForEnvironment(normalizeProotEnvironment(environment), script) { line ->
+            PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+        }
+    }
+
+    fun prootInstallApt(pluginId: String, environment: String = "plugin", packagesJson: String): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        val packages = parseStringList(packagesJson)
+        when (normalizeProotEnvironment(environment)) {
+            ProotEnvironment.MAIN -> ProotInstaller.runProotCommand(getAppContext(), buildAptInstallScript(packages)) { line ->
+                PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+            }
+            ProotEnvironment.PLUGIN -> PluginProotInstaller.installAptPackages(getAppContext(), packages) { line ->
+                PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+            }
+        }
+    }
+
+    fun prootCreatePythonVenv(
+        pluginId: String,
+        environment: String = "plugin",
+        name: String = "default",
+        packagesJson: String = "[]",
+        requirementsPath: String = ""
+    ): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        val packages = parseStringList(packagesJson)
+        val req = requirementsPath.trim().takeIf { it.isNotBlank() }
+        when (normalizeProotEnvironment(environment)) {
+            ProotEnvironment.MAIN -> {
+                val safe = name.trim().ifBlank { context.pluginId }.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+                runProotCommandForEnvironment(ProotEnvironment.MAIN, buildPythonVenvScript(safe, packages, req)) { line ->
+                    PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+                }
+                "/opt/r2droid-plugin-venvs/$safe"
+            }
+            ProotEnvironment.PLUGIN -> PluginProotInstaller.createPythonVenv(
+                context = getAppContext(),
+                name = name.ifBlank { context.pluginId },
+                packages = packages,
+                requirementsPath = req,
+                logger = { line -> PluginManager.appendRuntimeLog(pluginId, "[proot] $line") }
+            )
+        }
+    }
+
+    fun prootR2pmInstall(pluginId: String, environment: String = "main", packageName: String): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        runProotCommandForEnvironment(normalizeProotEnvironment(environment), buildR2pmInstallScript(packageName)) { line ->
+            PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+        }
+    }
+
+    fun prootR2(pluginId: String, environment: String = "main", r2Command: String, filePath: String = ""): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        val fileArg = filePath.trim().takeIf { it.isNotBlank() }?.let { " ${shellEscape(it)}" }.orEmpty()
+        runProotCommandForEnvironment(
+            normalizeProotEnvironment(environment),
+            "r2 -q -c ${shellEscape(r2Command)}$fileArg"
+        ) { line ->
+            PluginManager.appendRuntimeLog(pluginId, "[proot] $line")
+        }
+    }
+
+    fun prootPathInfo(pluginId: String, environment: String = "plugin"): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        when (normalizeProotEnvironment(environment)) {
+            ProotEnvironment.MAIN -> mainProotPathInfo(getAppContext())
+            ProotEnvironment.PLUGIN -> PluginProotInstaller.pathInfo(getAppContext())
+        }
+    }
+
+    fun prootProcessStart(pluginId: String, sessionId: String, environment: String = "plugin", commandLine: String): Result<String> = runCatching {
+        val context = createContext(pluginId)
+        requirePermission(context, Permission.PROOT)
+        requirePermission(context, Permission.PROCESS)
+        startProotProcess(context, sessionId, normalizeProotEnvironment(environment), commandLine)
     }
 
     fun runFridaScript(pluginId: String, script: String): Result<String> = runCatching {
@@ -488,6 +611,60 @@ object PluginRuntime {
                     if (isProcessAlive(context, sessionId)) "true" else "false"
                 }
 
+                function<String, String>("prootIsReady") { environment ->
+                    prootIsReady(context.pluginId, environment).map { it.toString() }.getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootEnsure") { args ->
+                    val environment = args.getOrNull(0)?.toString() ?: "plugin"
+                    val rootfsAlias = args.getOrNull(1)?.toString() ?: "ubuntu"
+                    prootEnsure(context.pluginId, environment, rootfsAlias).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootRun") { args ->
+                    val environment = args.getOrNull(0)?.toString() ?: "plugin"
+                    val script = args.getOrNull(1)?.toString() ?: ""
+                    prootRun(context.pluginId, environment, script).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootApt") { args ->
+                    val environment = args.getOrNull(0)?.toString() ?: "plugin"
+                    val packagesJson = args.getOrNull(1)?.toString() ?: "[]"
+                    prootInstallApt(context.pluginId, environment, packagesJson).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootVenv") { args ->
+                    val environment = args.getOrNull(0)?.toString() ?: "plugin"
+                    val name = args.getOrNull(1)?.toString() ?: context.pluginId
+                    val packagesJson = args.getOrNull(2)?.toString() ?: "[]"
+                    val requirements = args.getOrNull(3)?.toString() ?: ""
+                    prootCreatePythonVenv(context.pluginId, environment, name, packagesJson, requirements).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootR2pmInstall") { args ->
+                    val environment = args.getOrNull(0)?.toString() ?: "main"
+                    val packageName = args.getOrNull(1)?.toString() ?: ""
+                    prootR2pmInstall(context.pluginId, environment, packageName).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootR2") { args ->
+                    val environment = args.getOrNull(0)?.toString() ?: "main"
+                    val command = args.getOrNull(1)?.toString() ?: ""
+                    val filePath = args.getOrNull(2)?.toString() ?: ""
+                    prootR2(context.pluginId, environment, command, filePath).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String, String>("prootPathInfo") { environment ->
+                    prootPathInfo(context.pluginId, environment).getOrElse { "Error: ${it.message}" }
+                }
+
+                function<String>("prootProcStart") { args ->
+                    val sessionId = args.getOrNull(0)?.toString()?.ifBlank { "default" } ?: "default"
+                    val environment = args.getOrNull(1)?.toString() ?: "plugin"
+                    val commandLine = args.getOrNull(2)?.toString() ?: ""
+                    prootProcessStart(context.pluginId, sessionId, environment, commandLine).getOrElse { "Error: ${it.message}" }
+                }
+
                 function<String>("projectsRootDir") { _ ->
                     getProjectsRootDir(context.pluginId).getOrElse { "Error: ${it.message}" }
                 }
@@ -690,6 +867,62 @@ object PluginRuntime {
         return processSessions[key]?.process?.isAlive == true
     }
 
+    private fun startProotProcess(
+        context: RunContext,
+        sessionId: String,
+        environment: ProotEnvironment,
+        commandLine: String
+    ): String {
+        val resolved = applyTerminalCommandPlaceholders(commandLine, context.installDir)
+        require(resolved.isNotBlank()) { "empty command" }
+
+        val key = processKey(context.pluginId, sessionId)
+        stopProcessByKey(key)
+
+        val spec = when (environment) {
+            ProotEnvironment.MAIN -> R2Runtime.buildProotShellSpec(
+                context = getAppContext(),
+                shellCommand = resolved,
+                term = "dumb",
+                extraBindPaths = setOf(context.installDir.absolutePath, File(context.installDir, "data").absolutePath)
+            )
+            ProotEnvironment.PLUGIN -> PluginProotInstaller.buildShellSpec(
+                context = getAppContext(),
+                shellCommand = resolved,
+                term = "dumb",
+                extraBindPaths = setOf(context.installDir.absolutePath, File(context.installDir, "data").absolutePath)
+            )
+        }
+        val processBuilder = ProcessBuilder(spec.command)
+            .directory(spec.workingDirectory)
+            .redirectErrorStream(true)
+        processBuilder.environment().putAll(spec.environment)
+        val process = processBuilder.start()
+        registerProcessReader(context.pluginId, sessionId, key, process)
+        return "ok"
+    }
+
+    private fun registerProcessReader(pluginId: String, sessionId: String, key: String, process: Process) {
+        val queue = LinkedBlockingQueue<String>()
+        val reader = Thread {
+            runCatching {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { queue.offer(it) }
+                }
+            }
+            queue.offer("[[exit:${process.exitValueOrMinusOne()}]]")
+        }
+        reader.isDaemon = true
+        reader.name = "PluginProc-$pluginId-$sessionId"
+        reader.start()
+
+        processSessions[key] = ProcessSession(
+            key = key,
+            process = process,
+            outputQueue = queue
+        )
+    }
+
     private fun stopProcessByKey(key: String): Boolean {
         val session = processSessions.remove(key) ?: return false
         runCatching {
@@ -727,6 +960,104 @@ object PluginRuntime {
             .filter { it.isNotBlank() }
             .toList()
     }
+
+    private enum class ProotEnvironment { MAIN, PLUGIN }
+
+    private fun normalizeProotEnvironment(environment: String): ProotEnvironment {
+        return when (environment.trim().lowercase()) {
+            "main", "r2", "radare2" -> ProotEnvironment.MAIN
+            else -> ProotEnvironment.PLUGIN
+        }
+    }
+
+    private fun runProotCommandForEnvironment(
+        environment: ProotEnvironment,
+        script: String,
+        logger: ((String) -> Unit)? = null
+    ): String {
+        val appCtx = getAppContext()
+        return when (environment) {
+            ProotEnvironment.MAIN -> {
+                check(ProotInstaller.isEnvironmentReady(appCtx)) { "Main proot environment is not ready." }
+                ProotInstaller.runProotCommand(appCtx, script, logger)
+            }
+            ProotEnvironment.PLUGIN -> {
+                check(PluginProotInstaller.isReady(appCtx)) { "Plugin proot environment is not ready. Call prootEnsure('plugin') first." }
+                PluginProotInstaller.runCommand(appCtx, script, logger = logger)
+            }
+        }
+    }
+
+    private fun buildAptInstallScript(packages: List<String>): String {
+        val joined = packages.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+            .joinToString(" ") { shellEscape(it) }
+        if (joined.isBlank()) return "true"
+        return """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends $joined
+        """.trimIndent()
+    }
+
+    private fun buildPythonVenvScript(name: String, packages: List<String>, requirementsPath: String?): String {
+        val packagesArgs = packages.map { it.trim() }.filter { it.isNotBlank() }
+            .joinToString(" ") { shellEscape(it) }
+        val reqArg = requirementsPath?.trim()?.takeIf { it.isNotBlank() }?.let { " -r ${shellEscape(it)}" }.orEmpty()
+        return """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates
+            mkdir -p /opt/r2droid-plugin-venvs
+            python3 -m venv /opt/r2droid-plugin-venvs/$name
+            /opt/r2droid-plugin-venvs/$name/bin/python -m pip install --upgrade pip setuptools wheel
+            if [ -n ${shellEscape(packagesArgs + reqArg)} ]; then
+                /opt/r2droid-plugin-venvs/$name/bin/pip install $packagesArgs$reqArg
+            fi
+        """.trimIndent()
+    }
+
+    private fun buildR2pmInstallScript(packageName: String): String {
+        val safePackage = packageName.trim()
+        require(safePackage.matches(Regex("[A-Za-z0-9_.:+@/-]+"))) { "invalid r2pm package: $packageName" }
+        return """
+            set -e
+            export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+            export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/usr/lib/aarch64-linux-gnu:${'$'}{LD_LIBRARY_PATH:-}
+            export LIBRARY_PATH=/usr/local/lib:/usr/lib:/usr/lib/aarch64-linux-gnu:${'$'}{LIBRARY_PATH:-}
+            export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:${'$'}{PKG_CONFIG_PATH:-}
+            R2PM_BIN="$(command -v r2pm || true)"
+            [ -n "${'$'}R2PM_BIN" ] || R2PM_BIN=/usr/local/bin/r2pm
+            [ -x "${'$'}R2PM_BIN" ] || { echo "r2pm not found"; exit 127; }
+            "${'$'}R2PM_BIN" -U
+            hash -r
+            "${'$'}R2PM_BIN" -ci $safePackage
+        """.trimIndent()
+    }
+
+    private fun mainProotPathInfo(context: Context): String {
+        return "{" +
+            "\"runtimeDir\":\"${escapeJson(ProotInstaller.getRuntimeDir(context).absolutePath)}\"," +
+            "\"rootfsDir\":\"${escapeJson(ProotInstaller.getRootfsDir(context).absolutePath)}\"," +
+            "\"tmpDir\":\"${escapeJson(ProotInstaller.getHostTmpDir(context).absolutePath)}\"," +
+            "\"venvRoot\":\"/opt/r2droid-plugin-venvs\"" +
+            "}"
+    }
+
+    private fun parseStringList(value: String): List<String> {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return emptyList()
+        if (!trimmed.startsWith("[")) return trimmed.split(',', ' ', '\n').map { it.trim() }.filter { it.isNotBlank() }
+        return runCatching {
+            Json.parseToJsonElement(trimmed)
+                .let { element -> element as? kotlinx.serialization.json.JsonArray }
+                ?.mapNotNull { item -> item.toString().trim().trim('"').takeIf { it.isNotBlank() } }
+                .orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
+    private fun shellEscape(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
 
     private fun httpRequest(method: String, url: String, body: String, headersJson: String): String {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
