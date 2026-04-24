@@ -173,6 +173,8 @@ dependencies {
 
     // Markdown
     implementation(libs.compose.markdown)
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-svg:2.7.0")
 
     // AI Chat
     implementation(libs.openai.client)

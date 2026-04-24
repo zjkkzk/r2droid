@@ -199,6 +199,8 @@ private fun WebViewPluginPage(
         }
     }
 
+    val targetUrl = remember(pageFile.absolutePath) { pageFile.toURI().toString() }
+
     Box(modifier = modifier.fillMaxSize()) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -221,12 +223,12 @@ private fun WebViewPluginPage(
                     }
                     webChromeClient = WebChromeClient()
                     addJavascriptInterface(bridge, "R2PluginHost")
-                    loadUrl(pageFile.toURI().toString())
+                    loadUrl(targetUrl)
                 }
             },
             update = { webView ->
-                if (webView.url.isNullOrBlank()) {
-                    webView.loadUrl(pageFile.toURI().toString())
+                if (webView.url != targetUrl) {
+                    webView.loadUrl(targetUrl)
                 }
             }
         )

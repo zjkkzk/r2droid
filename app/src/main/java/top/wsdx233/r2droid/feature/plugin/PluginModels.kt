@@ -32,10 +32,12 @@ data class PluginManifest(
     @SerialName("author") val author: String = "",
     @SerialName("permissions") val permissions: List<String> = emptyList(),
     @SerialName("entry") val entry: PluginEntry? = null,
+    @SerialName("icon") val icon: PluginIcon? = null,
     @SerialName("ui") val ui: PluginUiOptions = PluginUiOptions(),
     @SerialName("proot") val proot: PluginProotConfig? = null,
     @SerialName("tabs") val tabs: List<PluginScreenTab> = emptyList(),
     @SerialName("projectTabs") val projectTabs: List<PluginProjectTab> = emptyList(),
+    @SerialName("navigation") val navigation: List<PluginNavigationItem> = emptyList(),
     @SerialName("appBarActions") val appBarActions: List<PluginProjectAction> = emptyList()
 )
 
@@ -85,6 +87,35 @@ data class PluginPage(
     @SerialName("type") val type: String = "webview",
     @SerialName("path") val path: String,
     @SerialName("function") val function: String? = null
+)
+
+@Serializable
+data class PluginIcon(
+    /** "material" = built-in Material icon by name, "asset" = plugin-local svg/png/webp. */
+    @SerialName("type") val type: String = "material",
+    @SerialName("name") val name: String? = null,
+    @SerialName("path") val path: String? = null,
+    /** When true, host tints the icon to match Material navigation colors. */
+    @SerialName("monochrome") val monochrome: Boolean = true
+)
+
+@Serializable
+data class PluginNavigationItem(
+    @SerialName("target") val target: String = "project",
+    @SerialName("key") val key: String,
+    @SerialName("title") val title: String,
+    @SerialName("icon") val icon: PluginIcon? = null,
+    @SerialName("order") val order: Int = 100,
+    @SerialName("visibleWhen") val visibleWhen: String = "always",
+    @SerialName("tabs") val tabs: List<PluginNavigationTab> = emptyList()
+)
+
+@Serializable
+data class PluginNavigationTab(
+    @SerialName("key") val key: String,
+    @SerialName("title") val title: String,
+    @SerialName("page") val page: PluginPage,
+    @SerialName("visibleWhen") val visibleWhen: String = "always"
 )
 
 @Serializable
@@ -160,6 +191,13 @@ data class PluginProjectActionDescriptor(
     val pluginId: String,
     val pluginName: String,
     val action: PluginProjectAction
+)
+
+data class PluginNavigationDescriptor(
+    val pluginId: String,
+    val pluginName: String,
+    val icon: PluginIcon?,
+    val navigation: PluginNavigationItem
 )
 
 @Serializable

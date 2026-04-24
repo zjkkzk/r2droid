@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FormatPaint
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
@@ -62,6 +63,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -85,6 +87,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -92,6 +95,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -102,6 +106,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import coil.compose.AsyncImage
+import coil.decode.SvgDecoder
+import coil.request.ImageRequest
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.wsdx233.r2droid.R
@@ -129,7 +136,7 @@ import top.wsdx233.r2droid.feature.r2frida.data.*
 import top.wsdx233.r2droid.feature.r2frida.ui.*
 import top.wsdx233.r2droid.feature.terminal.ui.CommandScreen
 import top.wsdx233.r2droid.feature.plugin.PluginManager
-import top.wsdx233.r2droid.feature.plugin.PluginPage
+import top.wsdx233.r2droid.feature.plugin.PluginNavigationDescriptor
 import top.wsdx233.r2droid.feature.plugin.PluginPageRenderer
 import top.wsdx233.r2droid.feature.plugin.PluginProjectActionDescriptor
 import top.wsdx233.r2droid.feature.plugin.PluginRuntime
@@ -188,6 +195,12 @@ fun ProjectScaffold(
 
     // State for navigation
     var selectedCategory by remember { mutableStateOf(MainCategory.List) }
+    var selectedPluginNavigationKey by remember { mutableStateOf<String?>(null) }
+    val selectedPluginNavigationTabs = remember { mutableStateMapOf<String, Int>() }
+    val selectBuiltinCategory: (MainCategory) -> Unit = { category ->
+        selectedPluginNavigationKey = null
+        selectedCategory = category
+    }
     var selectedListTabIndex by remember { mutableIntStateOf(0) }
     var selectedDetailTabIndex by remember { mutableIntStateOf(1) }
     var selectedProjectTabIndex by remember { mutableIntStateOf(0) }
@@ -330,8 +343,36 @@ fun ProjectScaffold(
         }
     }
 
+    val pluginNavigationItems by PluginManager.navigationItems.collectAsState()
+    val visiblePluginNavigationItems = remember(pluginNavigationItems, isR2Frida) {
+        pluginNavigationItems
+            .filter { it.navigation.target.equals("project", ignoreCase = true) }
+            .filter { isPluginVisible(it.navigation.visibleWhen, isR2Frida) }
+    }
+    val selectedPluginNavigation = visiblePluginNavigationItems
+        .firstOrNull { it.navigation.key == selectedPluginNavigationKey }
+    val selectedPluginNavigationTabIndex = selectedPluginNavigation?.let { descriptor ->
+        selectedPluginNavigationTabs[descriptor.navigation.key] ?: 0
+    } ?: 0
+    androidx.compose.runtime.LaunchedEffect(visiblePluginNavigationItems, selectedPluginNavigationKey) {
+        val key = selectedPluginNavigationKey ?: return@LaunchedEffect
+        val descriptor = visiblePluginNavigationItems.firstOrNull { it.navigation.key == key }
+        if (descriptor == null) {
+            selectedPluginNavigationKey = null
+            return@LaunchedEffect
+        }
+        val visibleTabs = descriptor.navigation.tabs.filter { isPluginVisible(it.visibleWhen, isR2Frida) }
+        val currentIndex = selectedPluginNavigationTabs[key] ?: 0
+        if (currentIndex >= visibleTabs.size) {
+            selectedPluginNavigationTabs[key] = 0
+        }
+    }
+
     val currentPluginActionTabAliases = remember(
         selectedCategory,
+        selectedPluginNavigation,
+        selectedPluginNavigationTabIndex,
+        isR2Frida,
         selectedListTabIndex,
         selectedDetailTabIndex,
         selectedProjectTabIndex,
@@ -348,7 +389,24 @@ fun ProjectScaffold(
         pluginAiTabs,
         pluginR2fridaTabs
     ) {
-        when (selectedCategory) {
+        selectedPluginNavigation?.let { descriptor ->
+            val visibleTabs = descriptor.navigation.tabs.filter { isPluginVisible(it.visibleWhen, isR2Frida) }
+            val tab = visibleTabs.getOrNull(selectedPluginNavigationTabIndex)
+            linkedSetOf<String>().apply {
+                add(descriptor.navigation.key)
+                add(descriptor.navigation.key.lowercase())
+                add(descriptor.navigation.title)
+                add(descriptor.navigation.title.lowercase())
+                tab?.let {
+                    add(it.key)
+                    add(it.key.lowercase())
+                    add("${descriptor.navigation.key}.${it.key}")
+                    add("${descriptor.navigation.key}.${it.key}".lowercase())
+                    add(it.title)
+                    add(it.title.lowercase())
+                }
+            }
+        } ?: when (selectedCategory) {
             MainCategory.List -> buildCurrentTabAliases(
                 selectedIndex = selectedListTabIndex,
                 allTitles = listTabTitles,
@@ -402,14 +460,15 @@ fun ProjectScaffold(
     }
     val disasmMultiSelect by disasmViewModel.multiSelectState.collectAsState()
     val isDisasmSelectionMode =
-        selectedCategory == MainCategory.Detail &&
+        selectedPluginNavigation == null &&
+            selectedCategory == MainCategory.Detail &&
             selectedDetailTabIndex == 1 &&
             disasmMultiSelect.active
 
     val quickJumpToDetail: ((Long) -> Unit)? = when (SettingsManager.defaultJumpTarget) {
         "hex", "disasm" -> { addr: Long ->
             val target = if (SettingsManager.defaultJumpTarget == "hex") 0 else 1
-            selectedCategory = MainCategory.Detail
+            selectBuiltinCategory(MainCategory.Detail)
             selectedDetailTabIndex = target
             viewModel.currentDetailTab = target
             viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
@@ -449,7 +508,7 @@ fun ProjectScaffold(
                     }
                 },
                 actions = {
-                    if (selectedCategory == MainCategory.Detail) {
+                    if (selectedPluginNavigation == null && selectedCategory == MainCategory.Detail) {
                         val canGoBack by viewModel.canGoBack.collectAsState()
                         if (!isDisasmSelectionMode) {
                             Box(
@@ -720,7 +779,7 @@ fun ProjectScaffold(
                                 Icon(Icons.AutoMirrored.Filled.MenuOpen, contentDescription = stringResource(R.string.menu_jump))
                             }
                         }
-                    } else if (selectedCategory == MainCategory.List && selectedListTabIndex == 7) {
+                    } else if (selectedPluginNavigation == null && selectedCategory == MainCategory.List && selectedListTabIndex == 7) {
                         var showStringsMenu by remember { mutableStateOf(false) }
                         val stringsUseFullRange by viewModel.stringsUseFullRange.collectAsState()
                         Box {
@@ -837,7 +896,7 @@ fun ProjectScaffold(
                     targetAddress = xrefsState.targetAddress,
                     onDismiss = { disasmViewModel.onEvent(DisasmEvent.DismissXrefs) },
                     onJump = { addr ->
-                        selectedCategory = MainCategory.Detail
+                        selectBuiltinCategory(MainCategory.Detail)
                         selectedDetailTabIndex = 1
                         viewModel.currentDetailTab = 1
                         viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
@@ -873,7 +932,7 @@ fun ProjectScaffold(
                         )
                     },
                     onJump = { addr ->
-                        selectedCategory = MainCategory.Detail
+                        selectBuiltinCategory(MainCategory.Detail)
                         selectedDetailTabIndex = 1
                         viewModel.currentDetailTab = 1
                         viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
@@ -891,7 +950,7 @@ fun ProjectScaffold(
                     targetAddress = functionXrefsState.targetAddress,
                     onDismiss = { disasmViewModel.onEvent(DisasmEvent.DismissFunctionXrefs) },
                     onJump = { addr ->
-                        selectedCategory = MainCategory.Detail
+                        selectBuiltinCategory(MainCategory.Detail)
                         selectedDetailTabIndex = 1
                         viewModel.currentDetailTab = 1
                         viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
@@ -919,12 +978,17 @@ fun ProjectScaffold(
             }
         },
         bottomBar = {
-            val isFridaScriptScreen = selectedCategory == MainCategory.R2Frida && selectedR2FridaTabIndex == 3
+            val isFridaScriptScreen = selectedPluginNavigation == null && selectedCategory == MainCategory.R2Frida && selectedR2FridaTabIndex == 3
             val hideBottomBar = isFridaScriptScreen && WindowInsets.isImeVisible
             if (!isWide && !hideBottomBar) {
                 ProjectBottomBar(
                     selectedCategory = selectedCategory,
-                    onCategorySelected = { selectedCategory = it },
+                    selectedPluginNavigation = selectedPluginNavigation,
+                    selectedPluginNavigationTabIndex = selectedPluginNavigationTabIndex,
+                    pluginNavigationItems = visiblePluginNavigationItems,
+                    onCategorySelected = { selectBuiltinCategory(it) },
+                    onPluginNavigationSelected = { selectedPluginNavigationKey = it.navigation.key },
+                    onPluginNavigationTabSelected = { key, index -> selectedPluginNavigationTabs[key] = index },
                     selectedListTabIndex = selectedListTabIndex,
                     onListTabSelected = { selectedListTabIndex = it },
                     selectedDetailTabIndex = selectedDetailTabIndex,
@@ -962,12 +1026,25 @@ fun ProjectScaffold(
                         .filter { it != MainCategory.AI || isAiEnabled }
                         .forEach { category ->
                             NavigationRailItem(
-                                selected = selectedCategory == category,
-                                onClick = { selectedCategory = category },
+                                selected = selectedPluginNavigation == null && selectedCategory == category,
+                                onClick = { selectBuiltinCategory(category) },
                                 icon = { Icon(category.icon, contentDescription = stringResource(category.titleRes)) },
                                 label = { Text(stringResource(category.titleRes), style = MaterialTheme.typography.labelSmall) }
                             )
                         }
+                    visiblePluginNavigationItems.forEach { descriptor ->
+                        NavigationRailItem(
+                            selected = selectedPluginNavigation?.navigation?.key == descriptor.navigation.key,
+                            onClick = { selectedPluginNavigationKey = descriptor.navigation.key },
+                            icon = {
+                                PluginNavigationIcon(
+                                    descriptor = descriptor,
+                                    contentDescription = descriptor.navigation.title
+                                )
+                            },
+                            label = { Text(descriptor.navigation.title, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
                 }
             }
             Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
@@ -975,6 +1052,10 @@ fun ProjectScaffold(
                 if (isWide) {
                     ProjectSubTabs(
                         selectedCategory = selectedCategory,
+                        selectedPluginNavigation = selectedPluginNavigation,
+                        selectedPluginNavigationTabIndex = selectedPluginNavigationTabIndex,
+                        onPluginNavigationTabSelected = { key, index -> selectedPluginNavigationTabs[key] = index },
+                        isR2Frida = isR2Frida,
                         selectedListTabIndex = selectedListTabIndex,
                         onListTabSelected = { selectedListTabIndex = it },
                         selectedDetailTabIndex = selectedDetailTabIndex,
@@ -1028,6 +1109,14 @@ fun ProjectScaffold(
                     }
                 }
                 is ProjectUiState.Success -> {
+                    if (selectedPluginNavigation != null) {
+                        RenderPluginNavigation(
+                            descriptor = selectedPluginNavigation,
+                            selectedTabIndex = selectedPluginNavigationTabIndex,
+                            isR2Frida = isR2Frida,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
                     when (selectedCategory) {
                         MainCategory.List -> {
                             if (selectedListTabIndex < baseListTabs.size) {
@@ -1046,7 +1135,7 @@ fun ProjectScaffold(
                                     functionsListState = listFunctionsState,
                                     onNavigateToDetail = { addr, tabIdx ->
                                         markVisited(addr)
-                                        selectedCategory = MainCategory.Detail
+                                        selectBuiltinCategory(MainCategory.Detail)
                                         selectedDetailTabIndex = tabIdx
                                         viewModel.currentDetailTab = tabIdx
                                         viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
@@ -1144,14 +1233,14 @@ fun ProjectScaffold(
                                     onCopy = { clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(it)) },
                                     onJumpToHex = { addr ->
                                         markVisited(addr)
-                                        selectedCategory = MainCategory.Detail
+                                        selectBuiltinCategory(MainCategory.Detail)
                                         selectedDetailTabIndex = 0
                                         viewModel.currentDetailTab = 0
                                         viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
                                     },
                                     onJumpToDisasm = { addr ->
                                         markVisited(addr)
-                                        selectedCategory = MainCategory.Detail
+                                        selectBuiltinCategory(MainCategory.Detail)
                                         selectedDetailTabIndex = 1
                                         viewModel.currentDetailTab = 1
                                         viewModel.onEvent(ProjectEvent.JumpToAddress(addr))
@@ -1350,6 +1439,7 @@ fun ProjectScaffold(
                             }
                         }
                     }
+                    }
                 }
                 else -> {}
             }
@@ -1436,10 +1526,7 @@ private fun RenderPluginInjectedTab(
         return
     }
 
-    val visible = when (pluginTab.tab.visibleWhen.lowercase()) {
-        "r2frida", "frida" -> isR2Frida
-        else -> true
-    }
+    val visible = isPluginVisible(pluginTab.tab.visibleWhen, isR2Frida)
 
     if (visible) {
         PluginPageRenderer(
@@ -1452,6 +1539,41 @@ private fun RenderPluginInjectedTab(
             text = "This tab is only available in r2frida session",
             modifier = modifier.padding(16.dp)
         )
+    }
+}
+
+@Composable
+private fun RenderPluginNavigation(
+    descriptor: PluginNavigationDescriptor,
+    selectedTabIndex: Int,
+    isR2Frida: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val visibleTabs = descriptor.navigation.tabs.filter { isPluginVisible(it.visibleWhen, isR2Frida) }
+    val tab = visibleTabs.getOrNull(selectedTabIndex)
+    if (tab == null) {
+        Text(
+            text = "Plugin navigation has no visible tabs: ${descriptor.navigation.title}",
+            modifier = modifier.padding(16.dp),
+            color = MaterialTheme.colorScheme.error
+        )
+        return
+    }
+
+    PluginPageRenderer(
+        pluginId = descriptor.pluginId,
+        page = tab.page,
+        modifier = modifier
+    )
+}
+
+private fun isPluginVisible(visibleWhen: String, isR2Frida: Boolean): Boolean {
+    return when (visibleWhen.trim().lowercase()) {
+        "", "always", "project" -> true
+        "r2frida", "frida" -> isR2Frida
+        "not_r2frida", "not_frida" -> !isR2Frida
+        "never", "false" -> false
+        else -> true
     }
 }
 
@@ -1495,6 +1617,65 @@ private fun isPluginProjectActionVisible(
         .ifEmpty { listOf("*") }
     return visibleTabs.any { visible ->
         visible == "*" || currentAliases.any { alias -> alias.equals(visible, ignoreCase = true) }
+    }
+}
+
+@Composable
+private fun PluginNavigationIcon(
+    descriptor: PluginNavigationDescriptor,
+    contentDescription: String?
+) {
+    val icon = descriptor.icon
+    val type = icon?.type?.trim()?.lowercase().orEmpty()
+    val assetPath = icon?.path?.trim().orEmpty()
+    if (type == "asset" && assetPath.isNotBlank()) {
+        val context = LocalContext.current
+        val file = remember(descriptor.pluginId, assetPath) {
+            PluginManager.resolvePluginFile(descriptor.pluginId, assetPath)
+        }
+        if (file != null && file.length() <= 256 * 1024) {
+            val request = remember(file) {
+                ImageRequest.Builder(context)
+                    .data(file)
+                    .apply {
+                        if (file.extension.equals("svg", ignoreCase = true)) {
+                            decoderFactory(SvgDecoder.Factory())
+                        }
+                    }
+                    .build()
+            }
+            AsyncImage(
+                model = request,
+                contentDescription = contentDescription,
+                modifier = Modifier.size(24.dp),
+                colorFilter = if (icon?.monochrome != false) ColorFilter.tint(LocalContentColor.current) else null
+            )
+            return
+        }
+    }
+
+    Icon(
+        imageVector = pluginMaterialIcon(icon?.name),
+        contentDescription = contentDescription
+    )
+}
+
+private fun pluginMaterialIcon(name: String?): ImageVector {
+    return when (name?.trim()?.lowercase()?.replace('-', '_')) {
+        "bug", "bug_report", "frida" -> Icons.Default.BugReport
+        "build", "tool", "tools" -> Icons.Default.Build
+        "ai", "smart_toy" -> Icons.Default.SmartToy
+        "search" -> Icons.Default.Search
+        "settings" -> Icons.Default.Settings
+        "info", "overview" -> Icons.Default.Info
+        "run", "play" -> Icons.Default.PlayArrow
+        "refresh", "reload" -> Icons.Default.Refresh
+        "save" -> Icons.Default.Save
+        "edit" -> Icons.Default.Edit
+        "delete", "remove" -> Icons.Default.Delete
+        "magic", "auto_fix" -> Icons.Default.AutoFixHigh
+        "extension", "plugin", "blutter" -> Icons.Default.Extension
+        else -> Icons.Default.Extension
     }
 }
 
@@ -1551,6 +1732,10 @@ private suspend fun executePluginProjectAction(
 @Composable
 private fun ProjectSubTabs(
     selectedCategory: MainCategory,
+    selectedPluginNavigation: PluginNavigationDescriptor?,
+    selectedPluginNavigationTabIndex: Int,
+    onPluginNavigationTabSelected: (String, Int) -> Unit,
+    isR2Frida: Boolean,
     selectedListTabIndex: Int,
     onListTabSelected: (Int) -> Unit,
     selectedDetailTabIndex: Int,
@@ -1576,6 +1761,28 @@ private fun ProjectSubTabs(
             modifier = Modifier.tabIndicatorOffset(tabPositions[idx]),
             color = MaterialTheme.colorScheme.primary
         )
+    }
+    if (selectedPluginNavigation != null) {
+        val visibleTabs = selectedPluginNavigation.navigation.tabs.filter { isPluginVisible(it.visibleWhen, isR2Frida) }
+        if (visibleTabs.isNotEmpty()) {
+            val safeIndex = selectedPluginNavigationTabIndex.coerceIn(0, visibleTabs.lastIndex)
+            ScrollableTabRow(
+                selectedTabIndex = safeIndex,
+                edgePadding = 0.dp,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+                indicator = { indicator(it, safeIndex) }
+            ) {
+                visibleTabs.forEachIndexed { i, tab ->
+                    Tab(
+                        selected = safeIndex == i,
+                        onClick = { onPluginNavigationTabSelected(selectedPluginNavigation.navigation.key, i) },
+                        text = { Text(tab.title) }
+                    )
+                }
+            }
+        }
+        return
     }
     when (selectedCategory) {
         MainCategory.List -> ScrollableTabRow(
@@ -1706,7 +1913,12 @@ private fun CommandBottomSheetContent(
 @Composable
 private fun ProjectBottomBar(
     selectedCategory: MainCategory,
+    selectedPluginNavigation: PluginNavigationDescriptor?,
+    selectedPluginNavigationTabIndex: Int,
+    pluginNavigationItems: List<PluginNavigationDescriptor>,
     onCategorySelected: (MainCategory) -> Unit,
+    onPluginNavigationSelected: (PluginNavigationDescriptor) -> Unit,
+    onPluginNavigationTabSelected: (String, Int) -> Unit,
     selectedListTabIndex: Int,
     onListTabSelected: (Int) -> Unit,
     selectedDetailTabIndex: Int,
@@ -1736,6 +1948,10 @@ private fun ProjectBottomBar(
         Column {
             ProjectSubTabs(
                 selectedCategory = selectedCategory,
+                selectedPluginNavigation = selectedPluginNavigation,
+                selectedPluginNavigationTabIndex = selectedPluginNavigationTabIndex,
+                onPluginNavigationTabSelected = onPluginNavigationTabSelected,
+                isR2Frida = isR2Frida,
                 selectedListTabIndex = selectedListTabIndex,
                 onListTabSelected = onListTabSelected,
                 selectedDetailTabIndex = selectedDetailTabIndex,
@@ -1769,12 +1985,25 @@ private fun ProjectBottomBar(
                     .filter { it != MainCategory.AI || SettingsManager.aiEnabled }
                     .forEach { category ->
                         NavigationBarItem(
-                            selected = selectedCategory == category,
+                            selected = selectedPluginNavigation == null && selectedCategory == category,
                             onClick = { onCategorySelected(category) },
                             icon = { Icon(category.icon, contentDescription = stringResource(category.titleRes)) },
                             label = { Text(stringResource(category.titleRes)) }
                         )
                     }
+                pluginNavigationItems.forEach { descriptor ->
+                    NavigationBarItem(
+                        selected = selectedPluginNavigation?.navigation?.key == descriptor.navigation.key,
+                        onClick = { onPluginNavigationSelected(descriptor) },
+                        icon = {
+                            PluginNavigationIcon(
+                                descriptor = descriptor,
+                                contentDescription = descriptor.navigation.title
+                            )
+                        },
+                        label = { Text(descriptor.navigation.title) }
+                    )
+                }
             }
         }
     }

@@ -59,6 +59,9 @@ object PluginManager {
     private val _projectActions = MutableStateFlow<List<PluginProjectActionDescriptor>>(emptyList())
     val projectActions = _projectActions.asStateFlow()
 
+    private val _navigationItems = MutableStateFlow<List<PluginNavigationDescriptor>>(emptyList())
+    val navigationItems = _navigationItems.asStateFlow()
+
     private val _repositorySources = MutableStateFlow<List<String>>(emptyList())
     val repositorySources = _repositorySources.asStateFlow()
 
@@ -506,6 +509,7 @@ object PluginManager {
                 ui = PluginUiOptions(),
                 tabs = emptyList(),
                 projectTabs = emptyList(),
+                navigation = emptyList(),
                 appBarActions = emptyList()
             )
             File(pluginDir, "manifest.json").writeText(
@@ -1164,6 +1168,20 @@ object PluginManager {
                     )
                 }
             }
+        _navigationItems.value = installedPlugins
+            .filter { it.state.enabled }
+            .flatMap { plugin ->
+                val manifest = plugin.manifest ?: return@flatMap emptyList()
+                manifest.navigation.map { navigation ->
+                    PluginNavigationDescriptor(
+                        pluginId = plugin.state.id,
+                        pluginName = manifest.name,
+                        icon = navigation.icon ?: manifest.icon,
+                        navigation = navigation
+                    )
+                }
+            }
+            .sortedWith(compareBy<PluginNavigationDescriptor> { it.navigation.order }.thenBy { it.navigation.title.lowercase() })
     }
 
     private fun readInstalledStates(): List<InstalledPluginState> {

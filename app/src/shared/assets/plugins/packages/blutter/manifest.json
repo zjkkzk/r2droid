@@ -1,7 +1,7 @@
 {
   "id": "blutter",
   "name": "Blutter APK Analyzer",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Run blutter in a dedicated Ubuntu proot environment to process Flutter APK files.",
   "author": "R2Droid",
   "permissions": [
@@ -9,6 +9,11 @@
     "process",
     "saf.picker"
   ],
+  "icon": {
+    "type": "asset",
+    "path": "icons/blutter.svg",
+    "monochrome": true
+  },
   "ui": {
     "showEnableToggle": true,
     "showEnableStatus": true
@@ -49,5 +54,53 @@
       "type": "webview",
       "path": "ui/index.html"
     }
-  }
+  },
+  "navigation": [
+    {
+      "target": "project",
+      "key": "blutter",
+      "title": "Blutter",
+      "icon": {
+        "type": "asset",
+        "path": "icons/blutter.svg",
+        "monochrome": true
+      },
+      "order": 70,
+      "visibleWhen": "always",
+      "tabs": [
+        {
+          "key": "overview",
+          "title": "概览",
+          "page": {
+            "type": "webview",
+            "path": "ui/index.html"
+          }
+        },
+        {
+          "key": "functions",
+          "title": "函数",
+          "page": {
+            "type": "webview",
+            "path": "ui/functions.html"
+          }
+        },
+        {
+          "key": "dart",
+          "title": "Dart",
+          "page": {
+            "type": "webview",
+            "path": "ui/dart.html"
+          }
+        },
+        {
+          "key": "classes",
+          "title": "类",
+          "page": {
+            "type": "webview",
+            "path": "ui/classes.html"
+          }
+        }
+      ]
+    }
+  ]
 }
