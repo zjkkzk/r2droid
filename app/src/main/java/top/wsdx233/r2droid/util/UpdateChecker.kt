@@ -4,10 +4,12 @@ import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import top.wsdx233.r2droid.core.data.model.GitHubAsset
 import top.wsdx233.r2droid.core.data.model.GitHubRelease
 import top.wsdx233.r2droid.core.data.model.UpdateInfo
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 
 object UpdateChecker {
     private const val GITHUB_API_URL = "https://api.github.com/repos/wsdx233/r2droid/releases/latest"
@@ -43,12 +45,14 @@ object UpdateChecker {
 
             // Compare versions
             if (currentVersion != null && isNewerVersion(latestVersion, currentVersion)) {
-                // Find APK asset
-                val apkAsset = release.assets.find { it.name.endsWith(".apk") }
+                val apkAsset = selectApkAsset(
+                    assets = release.assets,
+                    isProotOnlyBuild = AppVariant.isProotOnlyBuild
+                )
                 if (apkAsset != null) {
                     return@withContext UpdateInfo(
                         latestVersion = latestVersion,
-                        currentVersion = currentVersion ?: "0.0.0",
+                        currentVersion = currentVersion,
                         downloadUrl = apkAsset.browserDownloadUrl,
                         releaseUrl = release.htmlUrl,
                         releaseNotes = release.body
@@ -60,6 +64,32 @@ object UpdateChecker {
         } catch (e: Exception) {
             throw e
         }
+    }
+
+    private fun selectApkAsset(
+        assets: List<GitHubAsset>,
+        isProotOnlyBuild: Boolean
+    ): GitHubAsset? {
+        val apkAssets = assets.filter { it.name.endsWith(".apk", ignoreCase = true) }
+        if (apkAssets.isEmpty()) return null
+
+        return if (isProotOnlyBuild) {
+            // Proot-only builds use applicationIdSuffix ".proot", so installing the
+            // normal APK will not update the current app. Release assets are currently
+            // named like "R2Droid-Proot-vX.Y.Z.apk", but also support Gradle's
+            // default "prootOnly" file names for robustness.
+            apkAssets.firstOrNull { it.name.isProotApkName() }
+        } else {
+            // Full builds must avoid proot-only APKs when both variants are attached.
+            apkAssets.firstOrNull { !it.name.isProotApkName() }
+        }
+    }
+
+    private fun String.isProotApkName(): Boolean {
+        val normalized = lowercase(Locale.US)
+            .replace("_", "-")
+            .replace(" ", "-")
+        return normalized.contains("proot")
     }
 
     /**
