@@ -25,7 +25,8 @@ import top.wsdx233.r2droid.util.ProotInstallState
 @Composable
 fun ProotInstallDialog(
     state: ProotInstallState,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onRetry: (() -> Unit)? = null
 ) {
     val scrollState = rememberScrollState()
     val canClose = !state.isWorking
@@ -80,6 +81,11 @@ fun ProotInstallDialog(
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (state.status == ProotInstallState.Status.ERROR && state.canRetryCurrentStage && onRetry != null) {
+                    TextButton(onClick = onRetry) {
+                        Text(stringResource(R.string.common_retry))
+                    }
+                }
                 TextButton(onClick = onClose, enabled = canClose) {
                     Text(stringResource(R.string.proot_setup_close))
                 }

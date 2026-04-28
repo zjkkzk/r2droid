@@ -1634,7 +1634,16 @@ fun SettingsScreen(
     if (prootInstallState.status != top.wsdx233.r2droid.util.ProotInstallState.Status.IDLE) {
         ProotInstallDialog(
             state = prootInstallState,
-            onClose = { ProotInstaller.resetState() }
+            onClose = { ProotInstaller.resetState() },
+            onRetry = {
+                coroutineScope.launch {
+                    if (prootBuildMode == "manual") {
+                        ProotInstaller.installManual(context, rootfsAlias = prootRootfsAlias, forceReinstall = false)
+                    } else {
+                        ProotInstaller.install(context, rootfsAlias = prootRootfsAlias, forceReinstall = false)
+                    }
+                }
+            }
         )
     }
 

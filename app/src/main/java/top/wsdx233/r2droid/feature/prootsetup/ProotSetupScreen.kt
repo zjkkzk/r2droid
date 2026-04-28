@@ -148,9 +148,9 @@ fun ProotSetupScreen(
                             SettingsManager.prootRootfsAlias = selectedRootfs.alias
                             SettingsManager.prootBuildMode = if (selectedMode == ProotSetupMode.AUTO) "auto" else "manual"
                             val result = if (selectedMode == ProotSetupMode.AUTO) {
-                                ProotInstaller.install(context, rootfsAlias = selectedRootfs.alias, forceReinstall = true)
+                                ProotInstaller.install(context, rootfsAlias = selectedRootfs.alias, forceReinstall = false)
                             } else {
-                                ProotInstaller.installManual(context, rootfsAlias = selectedRootfs.alias, forceReinstall = true)
+                                ProotInstaller.installManual(context, rootfsAlias = selectedRootfs.alias, forceReinstall = false)
                             }
                             SettingsManager.useProotMode = result.isSuccess || SettingsManager.useProotMode
                         }
@@ -424,8 +424,10 @@ private fun ProotSetupProgressPage(
                 OutlinedButton(onClick = onChangeOptions, modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.proot_setup_change_options))
                 }
-                Button(onClick = onRetry, modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.common_retry))
+                if (state.canRetryCurrentStage) {
+                    Button(onClick = onRetry, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.common_retry))
+                    }
                 }
             }
         }

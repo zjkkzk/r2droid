@@ -1,6 +1,8 @@
 package top.wsdx233.r2droid.util
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.system.Os
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +28,8 @@ data class ProotInstallState(
     val status: Status = Status.IDLE,
     val progress: Float = 0f,
     val message: String = "",
-    val logs: List<String> = emptyList()
+    val logs: List<String> = emptyList(),
+    val canRetryCurrentStage: Boolean = false
 ) {
     enum class Status {
         IDLE,
@@ -55,9 +58,18 @@ object ProotInstaller {
     private const val TAG = "ProotInstaller"
     private const val PROOT_ASSET_NAME = "proot"
     private const val READY_MARKER_NAME = ".setup-complete"
+    private const val EXTRACT_MARKER_NAME = ".rootfs-extracted"
+    private const val STAGE_MARKER_DIR = ".setup-stages"
     private const val MAX_LOG_LINES = 160
 
     private val installMutex = Mutex()
+
+    private data class StageCommand(
+        val id: String,
+        val progress: Float,
+        val message: String,
+        val command: String
+    )
 
     private val _state = MutableStateFlow(ProotInstallState())
     val state = _state.asStateFlow()
@@ -73,6 +85,10 @@ object ProotInstaller {
     fun getHostTmpDir(context: Context): File = File(getRuntimeDir(context), "tmp")
 
     fun getReadyMarker(context: Context): File = File(getRuntimeDir(context), READY_MARKER_NAME)
+
+    private fun getExtractMarker(context: Context): File = File(getRuntimeDir(context), EXTRACT_MARKER_NAME)
+
+    private fun getStageMarkerDir(context: Context): File = File(getRuntimeDir(context), STAGE_MARKER_DIR)
 
     fun getR2rcFile(context: Context): File = File(getRootfsDir(context), "root/.radare2rc")
 
@@ -125,8 +141,11 @@ object ProotInstaller {
         Os.chmod(target.absolutePath, 493)
     }
 
-    private fun readReadyMetadata(context: Context): Map<String, String> {
-        val marker = getReadyMarker(context)
+    private fun readReadyMetadata(context: Context): Map<String, String> = readMarkerMetadata(getReadyMarker(context))
+
+    private fun readExtractMetadata(context: Context): Map<String, String> = readMarkerMetadata(getExtractMarker(context))
+
+    private fun readMarkerMetadata(marker: File): Map<String, String> {
         if (!marker.exists()) return emptyMap()
         return marker.readLines()
             .mapNotNull { line ->
@@ -149,6 +168,39 @@ object ProotInstaller {
                 }
             )
         }
+    }
+
+    private fun writeExtractMetadata(context: Context, option: ProotRootfsOption) {
+        getExtractMarker(context).apply {
+            parentFile?.mkdirs()
+            writeText(
+                buildString {
+                    appendLine("alias=${option.alias}")
+                    appendLine("url=${option.tarballUrl}")
+                    appendLine("strip=${option.tarballStripOpt}")
+                    appendLine("completedAt=${System.currentTimeMillis()}")
+                    option.sha256?.let { appendLine("sha256=$it") }
+                }
+            )
+        }
+    }
+
+    private fun stageMarker(context: Context, stageId: String): File {
+        val safe = stageId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        return File(getStageMarkerDir(context), "$safe.complete")
+    }
+
+    private fun isStageComplete(context: Context, stageId: String): Boolean = stageMarker(context, stageId).exists()
+
+    private fun markStageComplete(context: Context, stageId: String) {
+        stageMarker(context, stageId).apply {
+            parentFile?.mkdirs()
+            writeText("completedAt=${System.currentTimeMillis()}\n")
+        }
+    }
+
+    private fun clearStageMarkers(context: Context) {
+        getStageMarkerDir(context).deleteRecursively()
     }
 
     private fun resolveAutoRootfsOption(context: Context, rootfsAlias: String): ProotRootfsOption {
@@ -193,10 +245,12 @@ object ProotInstaller {
                     appendLog("Environment setup completed (${rootfsOption.displayName}).")
                 }.onFailure { error ->
                     Log.e(TAG, "Failed to install proot environment", error)
-                    appendLog("ERROR: ${error.message ?: "unknown error"}")
+                    val reason = buildInstallFailureReason(appContext, error, rootfsOption.tarballUrl)
+                    appendLog("INSTALL FAILED: $reason")
                     _state.value = _state.value.copy(
                         status = ProotInstallState.Status.ERROR,
-                        message = error.message ?: "Unknown error"
+                        message = reason,
+                        canRetryCurrentStage = true
                     )
                 }
             }
@@ -238,10 +292,12 @@ object ProotInstaller {
                     appendLog("Manual mode: ${rootfsOption.displayName} proot setup completed. Use the proot terminal to install r2 and plugins.")
                 }.onFailure { error ->
                     Log.e(TAG, "Failed to install proot environment (manual)", error)
-                    appendLog("ERROR: ${error.message ?: "unknown error"}")
+                    val reason = buildInstallFailureReason(appContext, error, rootfsOption.tarballUrl)
+                    appendLog("INSTALL FAILED: $reason")
                     _state.value = _state.value.copy(
                         status = ProotInstallState.Status.ERROR,
-                        message = error.message ?: "Unknown error"
+                        message = reason,
+                        canRetryCurrentStage = true
                     )
                 }
             }
@@ -258,73 +314,113 @@ object ProotInstaller {
         getReadyMarker(context).delete()
 
         if (forceReinstall) {
-            appendLog("Force reinstall requested, clearing existing rootfs.")
+            appendLog("Force reinstall requested, clearing existing rootfs and completed-stage markers.")
             getRootfsDir(context).deleteRecursively()
+            getExtractMarker(context).delete()
+            clearStageMarkers(context)
             getRootfsDir(context).mkdirs()
         }
     }
 
-    private fun downloadRootfsIfNeeded(context: Context, option: ProotRootfsOption) {
+    private fun downloadRootfsIfNeeded(context: Context, option: ProotRootfsOption, forceRedownload: Boolean = false) {
         val archive = getArchiveFile(context, option)
-        if (archive.exists() && archive.length() > 0L) {
+        if (!forceRedownload && archive.exists() && archive.length() > 0L) {
             appendLog("Using cached rootfs archive: ${archive.absolutePath}")
             return
+        }
+        if (forceRedownload) {
+            appendLog("Discarding cached rootfs archive and downloading it again.")
+            archive.delete()
         }
 
         updateState(ProotInstallState.Status.DOWNLOADING, 0.1f, "Downloading ${option.displayName} rootfs...")
         appendLog("Downloading ${option.tarballUrl}")
 
+        val archiveDir = archive.parentFile ?: File(context.cacheDir, "proot")
+        val tempArchive = File(archiveDir, "${archive.name}.part")
+        archiveDir.mkdirs()
+        tempArchive.delete()
+
         val conn = java.net.URL(option.tarballUrl).openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 60_000
-        conn.instanceFollowRedirects = true
-        conn.requestMethod = "GET"
-        conn.connect()
+        try {
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 60_000
+            conn.instanceFollowRedirects = true
+            conn.requestMethod = "GET"
+            conn.connect()
 
-        if (conn.responseCode !in 200..299) {
-            conn.disconnect()
-            throw IllegalStateException("Failed to download rootfs: HTTP ${conn.responseCode}")
-        }
+            if (conn.responseCode !in 200..299) {
+                throw IllegalStateException("Failed to download rootfs: HTTP ${conn.responseCode}")
+            }
 
-        val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: -1L
-        var downloaded = 0L
-        var lastReported = 0L
+            val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: -1L
+            var downloaded = 0L
+            var lastReported = 0L
 
-        archive.parentFile?.mkdirs()
-        BufferedInputStream(conn.inputStream).use { input ->
-            FileOutputStream(archive).use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var len: Int
-                while (input.read(buffer).also { len = it } != -1) {
-                    output.write(buffer, 0, len)
-                    downloaded += len
-                    if (downloaded - lastReported >= 256 * 1024 || (totalBytes > 0 && downloaded == totalBytes)) {
-                        lastReported = downloaded
-                        if (totalBytes > 0) {
-                            val stageProgress = 0.1f + (downloaded.toFloat() / totalBytes.toFloat()) * 0.25f
-                            updateState(
-                                ProotInstallState.Status.DOWNLOADING,
-                                stageProgress.coerceAtMost(0.35f),
-                                "Downloading ${option.displayName} rootfs..."
-                            )
+            BufferedInputStream(conn.inputStream).use { input ->
+                FileOutputStream(tempArchive).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var len: Int
+                    while (input.read(buffer).also { len = it } != -1) {
+                        output.write(buffer, 0, len)
+                        downloaded += len
+                        if (downloaded - lastReported >= 256 * 1024 || (totalBytes > 0 && downloaded == totalBytes)) {
+                            lastReported = downloaded
+                            if (totalBytes > 0) {
+                                val stageProgress = 0.1f + (downloaded.toFloat() / totalBytes.toFloat()) * 0.25f
+                                updateState(
+                                    ProotInstallState.Status.DOWNLOADING,
+                                    stageProgress.coerceAtMost(0.35f),
+                                    "Downloading ${option.displayName} rootfs..."
+                                )
+                            }
                         }
                     }
                 }
             }
+
+            if (totalBytes > 0 && tempArchive.length() != totalBytes) {
+                throw IllegalStateException("Rootfs download incomplete: ${tempArchive.length()} / $totalBytes bytes")
+            }
+            archive.delete()
+            if (!tempArchive.renameTo(archive)) {
+                tempArchive.copyTo(archive, overwrite = true)
+                tempArchive.delete()
+            }
+            appendLog("Download finished (${archive.length()} bytes).")
+        } catch (error: Throwable) {
+            tempArchive.delete()
+            throw error
+        } finally {
+            conn.disconnect()
         }
-        conn.disconnect()
-        appendLog("Download finished (${archive.length()} bytes).")
     }
 
     private fun extractRootfsIfNeeded(context: Context, option: ProotRootfsOption) {
         val rootfsDir = getRootfsDir(context)
-        val readyMarker = getReadyMarker(context)
-        val installedAlias = readReadyMetadata(context)["alias"]
-        if (readyMarker.exists() && installedAlias == option.alias && rootfsDir.resolve("bin").exists()) {
-            appendLog("Existing rootfs looks ready, skipping extraction.")
+        val readyAlias = readReadyMetadata(context)["alias"]
+        val extractedAlias = readExtractMetadata(context)["alias"]
+        if ((readyAlias == option.alias || extractedAlias == option.alias) && rootfsDir.resolve("bin").exists()) {
+            appendLog("Existing ${option.displayName} rootfs is already extracted, skipping extraction.")
             return
         }
 
+        runCatching {
+            extractRootfsArchive(context, option)
+        }.onFailure { firstError ->
+            appendLog("Rootfs extraction failed: ${firstError.message ?: firstError::class.java.simpleName}")
+            appendLog("The cached archive may be incomplete or corrupted; re-downloading rootfs and retrying extraction once.")
+            getArchiveFile(context, option).delete()
+            rootfsDir.deleteRecursively()
+            getExtractMarker(context).delete()
+            clearStageMarkers(context)
+            downloadRootfsIfNeeded(context, option, forceRedownload = true)
+            extractRootfsArchive(context, option)
+        }.getOrThrow()
+    }
+
+    private fun extractRootfsArchive(context: Context, option: ProotRootfsOption) {
+        val rootfsDir = getRootfsDir(context)
         val archive = getArchiveFile(context, option)
         if (!archive.exists()) {
             throw IllegalStateException("Rootfs archive is missing.")
@@ -335,10 +431,13 @@ object ProotInstaller {
 
         rootfsDir.deleteRecursively()
         rootfsDir.mkdirs()
+        getExtractMarker(context).delete()
+        clearStageMarkers(context)
 
         val totalBytes = archive.length().takeIf { it > 0 } ?: -1L
         var bytesReadTotal = 0L
         var lastReported = 0L
+        val rootCanonical = rootfsDir.canonicalPath
 
         archive.inputStream().buffered().use { fileInput ->
             val countingInput = object : InputStream() {
@@ -376,7 +475,7 @@ object ProotInstaller {
                     val currentEntry = entry ?: continue
                     val normalizedEntryName = stripArchivePath(currentEntry.name, option.tarballStripOpt) ?: continue
                     val outputFile = File(rootfsDir, normalizedEntryName)
-                    if (!outputFile.canonicalPath.startsWith(rootfsDir.canonicalPath)) {
+                    if (!outputFile.canonicalPath.startsWith(rootCanonical)) {
                         throw SecurityException("Invalid archive entry: ${currentEntry.name}")
                     }
                     when {
@@ -392,6 +491,7 @@ object ProotInstaller {
                 }
             }
         }
+        writeExtractMetadata(context, option)
         appendLog("Extraction finished.")
     }
 
@@ -440,14 +540,14 @@ object ProotInstaller {
 
     private fun installPackages(context: Context) {
         val setupCommands = listOf(
-            Triple(0.7f, "Updating apt sources...", """
+            StageCommand("apt-update", 0.7f, "Updating apt sources...", """
                 set -e
                 if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
                     sed -i 's/^Components: .*/Components: main restricted universe multiverse/' /etc/apt/sources.list.d/ubuntu.sources
                 fi
                 apt-get update
             """.trimIndent()),
-            Triple(0.78f, "Installing build toolchain...", """
+            StageCommand("build-toolchain", 0.78f, "Installing build toolchain...", """
                 set -e
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get install -y --no-install-recommends \
@@ -469,12 +569,13 @@ object ProotInstaller {
                     libssl-dev \
                     libzip-dev
             """.trimIndent()),
-            Triple(0.86f, "Installing radare2 from source...", """
+            StageCommand("radare2-source", 0.86f, "Installing radare2 from source...", """
                 set -e
                 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
                 export MAKE_JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
                 mkdir -p /opt/src
                 if [ ! -d /opt/src/radare2/.git ]; then
+                    rm -rf /opt/src/radare2
                     git clone --depth 1 https://github.com/radareorg/radare2 /opt/src/radare2
                 else
                     cd /opt/src/radare2
@@ -495,22 +596,32 @@ object ProotInstaller {
             """.trimIndent())
         )
 
-        setupCommands.forEach { (progress, message, command) ->
-            updateState(ProotInstallState.Status.INSTALLING_PACKAGES, progress, message)
-            runProotCommand(context, command)
+        setupCommands.forEach { stage ->
+            if (isStageComplete(context, stage.id)) {
+                appendLog("Skipping completed stage: ${stage.message}")
+                return@forEach
+            }
+            updateState(ProotInstallState.Status.INSTALLING_PACKAGES, stage.progress, stage.message)
+            runProotCommand(context, stage.command)
+            markStageComplete(context, stage.id)
         }
     }
 
     private fun installPlugins(context: Context) {
         val pluginCommands = listOf(
-            Triple(0.9f, "Installing r2dec with r2pm...", "r2dec"),
-            Triple(0.95f, "Installing r2ghidra with r2pm...", "r2ghidra"),
-            Triple(0.99f, "Installing r2frida with r2pm...", "r2frida")
+            StageCommand("r2pm-r2dec", 0.9f, "Installing r2dec with r2pm...", "r2dec"),
+            StageCommand("r2pm-r2ghidra", 0.95f, "Installing r2ghidra with r2pm...", "r2ghidra"),
+            StageCommand("r2pm-r2frida", 0.99f, "Installing r2frida with r2pm...", "r2frida")
         )
 
-        pluginCommands.forEach { (progress, message, pluginName) ->
-            updateState(ProotInstallState.Status.INSTALLING_PLUGINS, progress, message)
-            runProotCommand(context, buildR2pmInstallScript(pluginName))
+        pluginCommands.forEach { stage ->
+            if (isStageComplete(context, stage.id)) {
+                appendLog("Skipping completed stage: ${stage.message}")
+                return@forEach
+            }
+            updateState(ProotInstallState.Status.INSTALLING_PLUGINS, stage.progress, stage.message)
+            runProotCommand(context, buildR2pmInstallScript(stage.command))
+            markStageComplete(context, stage.id)
         }
     }
 
@@ -587,6 +698,29 @@ object ProotInstaller {
         return output.toString()
     }
 
+    fun buildInstallFailureReason(context: Context, error: Throwable, sourceUrl: String? = null): String {
+        val base = error.message?.takeIf { it.isNotBlank() } ?: error::class.java.simpleName
+        val network = describeNetworkConnectivity(context)
+        val source = sourceUrl?.takeIf { it.isNotBlank() }?.let { " Source: $it." }.orEmpty()
+        return "$base. Network: $network.$source"
+    }
+
+    private fun describeNetworkConnectivity(context: Context): String {
+        return runCatching {
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return@runCatching "unknown (connectivity service unavailable)"
+            val activeNetwork = connectivityManager.activeNetwork
+                ?: return@runCatching "offline (no active network)"
+            val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+                ?: return@runCatching "unknown (no network capabilities)"
+            when {
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) -> "connected, but Android reports no internet capability"
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) -> "online"
+                else -> "network present, but internet connectivity is not validated"
+            }
+        }.getOrElse { "unknown (${it.message ?: it::class.java.simpleName})" }
+    }
+
     private fun queryDnsServers(): List<String> {
         val keys = listOf(
             "net.dns1",
@@ -614,7 +748,12 @@ object ProotInstaller {
     }
 
     private fun updateState(status: ProotInstallState.Status, progress: Float, message: String) {
-        _state.value = _state.value.copy(status = status, progress = progress, message = message)
+        _state.value = _state.value.copy(
+            status = status,
+            progress = progress,
+            message = message,
+            canRetryCurrentStage = false
+        )
     }
 
     private fun appendLog(line: String) {

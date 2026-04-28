@@ -248,6 +248,9 @@ private fun WebViewPluginPage(
                 onClose = {
                     showPluginProotDialog = false
                     PluginProotInstaller.resetState()
+                },
+                onRetry = {
+                    scope.launch { PluginManager.prepareProotForPlugin(pluginId, force = false) }
                 }
             )
         }

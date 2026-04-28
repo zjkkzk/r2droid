@@ -24,6 +24,7 @@ import java.io.InputStream
  */
 object PluginProotInstaller {
     private const val READY_MARKER_NAME = ".setup-complete"
+    private const val EXTRACT_MARKER_NAME = ".rootfs-extracted"
     private const val MAX_LOG_LINES = 180
 
     private val _state = MutableStateFlow(ProotInstallState())
@@ -36,6 +37,8 @@ object PluginProotInstaller {
     fun getHostTmpDir(context: Context): File = File(getRuntimeDir(context), "tmp")
 
     fun getReadyMarker(context: Context): File = File(getRuntimeDir(context), READY_MARKER_NAME)
+
+    private fun getExtractMarker(context: Context): File = File(getRuntimeDir(context), EXTRACT_MARKER_NAME)
 
     fun getVenvDir(context: Context, name: String): File {
         val safe = name.trim().ifBlank { "default" }.replace(Regex("[^A-Za-z0-9_.-]"), "_")
@@ -56,7 +59,8 @@ object PluginProotInstaller {
         _state.value = _state.value.copy(
             status = status,
             progress = progress.coerceIn(0f, 1f),
-            message = message
+            message = message,
+            canRetryCurrentStage = false
         )
     }
 
@@ -73,11 +77,17 @@ object PluginProotInstaller {
         )
     }
 
-    fun markError(error: Throwable) {
-        appendLog("ERROR: ${error.message ?: "unknown error"}")
+    fun markError(error: Throwable, context: Context? = null, sourceUrl: String? = null) {
+        val reason = if (context != null) {
+            ProotInstaller.buildInstallFailureReason(context, error, sourceUrl)
+        } else {
+            error.message ?: "Unknown error"
+        }
+        appendLog("INSTALL FAILED: $reason")
         _state.value = _state.value.copy(
             status = ProotInstallState.Status.ERROR,
-            message = error.message ?: "Unknown error"
+            message = reason,
+            canRetryCurrentStage = true
         )
     }
 
@@ -230,63 +240,107 @@ object PluginProotInstaller {
         getReadyMarker(context).delete()
         if (forceReinstall) {
             getRootfsDir(context).deleteRecursively()
+            getExtractMarker(context).delete()
         }
         getRootfsDir(context).mkdirs()
     }
 
-    private fun downloadRootfsIfNeeded(context: Context, option: ProotRootfsOption, logger: ((String) -> Unit)?) {
+    private fun downloadRootfsIfNeeded(context: Context, option: ProotRootfsOption, logger: ((String) -> Unit)?, forceRedownload: Boolean = false) {
         val archive = getArchiveFile(context, option)
-        if (archive.exists() && archive.length() > 0L) {
+        if (!forceRedownload && archive.exists() && archive.length() > 0L) {
             val message = "Using cached plugin proot rootfs: ${archive.absolutePath}"
             updateState(ProotInstallState.Status.DOWNLOADING, 0.45f, message)
             appendLog(message)
             logger?.invoke(message)
             return
         }
+        if (forceRedownload) {
+            appendLog("Discarding cached plugin proot rootfs and downloading it again.")
+            logger?.invoke("Discarding cached plugin proot rootfs and downloading it again.")
+            archive.delete()
+        }
         updateState(ProotInstallState.Status.DOWNLOADING, 0.05f, "Downloading plugin proot rootfs...")
         appendLog("Downloading plugin proot rootfs: ${option.tarballUrl}")
         logger?.invoke("Downloading plugin proot rootfs: ${option.tarballUrl}")
+        val archiveDir = archive.parentFile ?: File(context.cacheDir, "plugin-proot")
+        archiveDir.mkdirs()
+        val tempArchive = File(archiveDir, "${archive.name}.part")
+        tempArchive.delete()
         val conn = java.net.URL(option.tarballUrl).openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 60_000
-        conn.instanceFollowRedirects = true
-        conn.requestMethod = "GET"
-        conn.connect()
-        if (conn.responseCode !in 200..299) {
-            val code = conn.responseCode
-            conn.disconnect()
-            throw IllegalStateException("Failed to download plugin proot rootfs: HTTP $code")
-        }
-        val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: -1L
-        var downloaded = 0L
-        var lastReported = 0L
-        archive.parentFile?.mkdirs()
-        BufferedInputStream(conn.inputStream).use { input ->
-            FileOutputStream(archive).use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var len: Int
-                while (input.read(buffer).also { len = it } != -1) {
-                    output.write(buffer, 0, len)
-                    downloaded += len
-                    if (downloaded - lastReported >= 512 * 1024 || (totalBytes > 0 && downloaded == totalBytes)) {
-                        lastReported = downloaded
-                        if (totalBytes > 0) {
-                            val progress = 0.05f + (downloaded.toFloat() / totalBytes.toFloat()) * 0.40f
-                            updateState(ProotInstallState.Status.DOWNLOADING, progress, "Downloading plugin proot rootfs...")
-                        } else {
-                            updateState(ProotInstallState.Status.DOWNLOADING, 0.1f, "Downloading plugin proot rootfs... ${downloaded / 1024 / 1024} MB")
+        try {
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 60_000
+            conn.instanceFollowRedirects = true
+            conn.requestMethod = "GET"
+            conn.connect()
+            if (conn.responseCode !in 200..299) {
+                throw IllegalStateException("Failed to download plugin proot rootfs: HTTP ${conn.responseCode}")
+            }
+            val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: -1L
+            var downloaded = 0L
+            var lastReported = 0L
+            BufferedInputStream(conn.inputStream).use { input ->
+                FileOutputStream(tempArchive).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var len: Int
+                    while (input.read(buffer).also { len = it } != -1) {
+                        output.write(buffer, 0, len)
+                        downloaded += len
+                        if (downloaded - lastReported >= 512 * 1024 || (totalBytes > 0 && downloaded == totalBytes)) {
+                            lastReported = downloaded
+                            if (totalBytes > 0) {
+                                val progress = 0.05f + (downloaded.toFloat() / totalBytes.toFloat()) * 0.40f
+                                updateState(ProotInstallState.Status.DOWNLOADING, progress, "Downloading plugin proot rootfs...")
+                            } else {
+                                updateState(ProotInstallState.Status.DOWNLOADING, 0.1f, "Downloading plugin proot rootfs... ${downloaded / 1024 / 1024} MB")
+                            }
                         }
                     }
                 }
             }
+            if (totalBytes > 0 && tempArchive.length() != totalBytes) {
+                throw IllegalStateException("Plugin proot rootfs download incomplete: ${tempArchive.length()} / $totalBytes bytes")
+            }
+            archive.delete()
+            if (!tempArchive.renameTo(archive)) {
+                tempArchive.copyTo(archive, overwrite = true)
+                tempArchive.delete()
+            }
+            updateState(ProotInstallState.Status.DOWNLOADING, 0.45f, "Plugin proot rootfs downloaded.")
+            appendLog("Plugin proot rootfs downloaded (${archive.length()} bytes).")
+            logger?.invoke("Plugin proot rootfs downloaded (${archive.length()} bytes).")
+        } catch (error: Throwable) {
+            tempArchive.delete()
+            throw error
+        } finally {
+            conn.disconnect()
         }
-        conn.disconnect()
-        updateState(ProotInstallState.Status.DOWNLOADING, 0.45f, "Plugin proot rootfs downloaded.")
-        appendLog("Plugin proot rootfs downloaded (${archive.length()} bytes).")
-        logger?.invoke("Plugin proot rootfs downloaded (${archive.length()} bytes).")
     }
 
     private fun extractRootfs(context: Context, option: ProotRootfsOption, logger: ((String) -> Unit)?) {
+        val rootfsDir = getRootfsDir(context)
+        val readyAlias = readReadyMetadata(context)["alias"]
+        val extractedAlias = readMarkerMetadata(getExtractMarker(context))["alias"]
+        if ((readyAlias == option.alias || extractedAlias == option.alias) && rootfsDir.resolve("bin").exists()) {
+            val message = "Plugin proot rootfs is already extracted; skipping extraction."
+            appendLog(message)
+            logger?.invoke(message)
+            return
+        }
+        runCatching {
+            extractRootfsArchive(context, option, logger)
+        }.onFailure { firstError ->
+            appendLog("Plugin proot extraction failed: ${firstError.message ?: firstError::class.java.simpleName}")
+            logger?.invoke("Plugin proot extraction failed; re-downloading rootfs and retrying extraction once.")
+            getArchiveFile(context, option).delete()
+            rootfsDir.deleteRecursively()
+            getExtractMarker(context).delete()
+            downloadRootfsIfNeeded(context, option, logger, forceRedownload = true)
+            extractRootfsArchive(context, option, logger)
+        }.getOrThrow()
+    }
+
+    private fun extractRootfsArchive(context: Context, option: ProotRootfsOption, logger: ((String) -> Unit)?) {
         val archive = getArchiveFile(context, option)
         check(archive.exists()) { "Plugin proot rootfs archive is missing." }
         val rootfsDir = getRootfsDir(context)
@@ -295,6 +349,7 @@ object PluginProotInstaller {
         logger?.invoke("Extracting plugin proot rootfs to ${rootfsDir.absolutePath}")
         rootfsDir.deleteRecursively()
         rootfsDir.mkdirs()
+        getExtractMarker(context).delete()
         val rootCanonical = rootfsDir.canonicalPath
         var entryCount = 0
         archive.inputStream().buffered().use { fileInput ->
@@ -324,6 +379,7 @@ object PluginProotInstaller {
                 }
             }
         }
+        writeExtractMetadata(context, option)
         updateState(ProotInstallState.Status.EXTRACTING, 0.75f, "Plugin proot extraction finished.")
         appendLog("Plugin proot extraction finished.")
         logger?.invoke("Plugin proot extraction finished.")
@@ -435,8 +491,9 @@ object PluginProotInstaller {
         }
     }
 
-    private fun readReadyMetadata(context: Context): Map<String, String> {
-        val marker = getReadyMarker(context)
+    private fun readReadyMetadata(context: Context): Map<String, String> = readMarkerMetadata(getReadyMarker(context))
+
+    private fun readMarkerMetadata(marker: File): Map<String, String> {
         if (!marker.exists()) return emptyMap()
         return marker.readLines().mapNotNull { line ->
             val idx = line.indexOf('=')
@@ -453,6 +510,21 @@ object PluginProotInstaller {
                     appendLine("url=${option.tarballUrl}")
                     appendLine("mode=plugin")
                     appendLine("strip=${option.tarballStripOpt}")
+                    option.sha256?.let { appendLine("sha256=$it") }
+                }
+            )
+        }
+    }
+
+    private fun writeExtractMetadata(context: Context, option: ProotRootfsOption) {
+        getExtractMarker(context).apply {
+            parentFile?.mkdirs()
+            writeText(
+                buildString {
+                    appendLine("alias=${option.alias}")
+                    appendLine("url=${option.tarballUrl}")
+                    appendLine("strip=${option.tarballStripOpt}")
+                    appendLine("completedAt=${System.currentTimeMillis()}")
                     option.sha256?.let { appendLine("sha256=$it") }
                 }
             )

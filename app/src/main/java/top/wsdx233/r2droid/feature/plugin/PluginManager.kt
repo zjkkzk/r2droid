@@ -20,6 +20,7 @@ import top.wsdx233.r2droid.core.data.prefs.SettingsManager
 import top.wsdx233.r2droid.util.PluginProotInstaller
 import top.wsdx233.r2droid.util.ProotInstallState
 import top.wsdx233.r2droid.util.ProotInstaller
+import top.wsdx233.r2droid.util.ProotRootfsCatalog
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -937,7 +938,15 @@ object PluginManager {
             }
             PluginProotInstaller.resetState()
             runProotSetupIfPresent(pluginId, reason = if (force) "repair" else "prepare")
-        }.onFailure { PluginProotInstaller.markError(it) }
+        }.onFailure { error ->
+            val config = runCatching { findInstalledPlugin(pluginId)?.manifest?.proot }.getOrNull()
+            val sourceUrl = config?.let { prootConfig ->
+                runCatching {
+                    ProotRootfsCatalog.resolve(appContext, prootConfig.rootfsAlias.ifBlank { "ubuntu" }).tarballUrl
+                }.getOrNull()
+            }
+            PluginProotInstaller.markError(error, appContext, sourceUrl)
+        }
     }
 
     private fun isPluginProotSetupSatisfied(plugin: InstalledPlugin, config: PluginProotConfig): Boolean {
